@@ -16,7 +16,7 @@ Claude ─stdio─▶ mcp/ (buyer wallet) ──x402──▶ worker/ /x/:id ─
 ```
 worker/    Hono on Cloudflare Workers + D1: seller API, paid proxy, catalog
 mcp/       MCP server Claude uses to discover and pay for endpoints (local stdio, or hosted on Workers with Privy wallets)
-scripts/   seller CLI (stand-in for the dashboard) + example endpoints
+scripts/   seller CLI (stand-in for the dashboard), example endpoints, MultiBaas setup
 frontend.md  plan for the seller dashboard
 ```
 
@@ -121,6 +121,53 @@ The key stays in the gateway (`INTERCEPTA_API_KEY` secret); the MCP server and t
 - The signature scanner's `messageType` enum lists only permit types; explicit support for EIP-3009 `TransferWithAuthorization` (what x402 signs) would make it a natural fit.
 - An x402-specific endpoint (screen a whole `PAYMENT-REQUIRED` quote in one call) would replace three calls.
 
+## Onchain verification (Curvegrid MultiBaas)
+
+**Tollgate proves every x402 payment onchain: MultiBaas indexes USDC on Base Sepolia, and the seller dashboard reconciles what the gateway recorded against what actually reached the seller's wallet, then tells them what to do about the difference.**
+
+The gateway records a call as settled when the x402 facilitator says so, and until now that report was the only source for the seller's income. An x402 settlement is a USDC `transferWithAuthorization`, so it emits `Transfer(payer → seller, amount)`. MultiBaas gives us an independent record of those transfers:
+
+```
+buyer ─x402─▶ /x/:id ──▶ facilitator settles ──▶ USDC Transfer (Base Sepolia)
+                │ calls.tx_hash                              │ indexed by MultiBaas
+                ▼                                            ▼
+               D1 ◀── POST /hooks/multibaas (HMAC) ◀── event.emitted webhook
+                │                                            ▲
+  dashboard ◀── /api/reconcile, /api/actions ── ad hoc event query (backfill)
+```
+
+How MultiBaas is used ([`worker/src/multibaas.ts`](worker/src/multibaas.ts), [`scripts/multibaas-setup.ts`](scripts/multibaas-setup.ts)):
+
+- **Contract library + address linking**: the setup script adds the USDC `Transfer` ABI, aliases the Base Sepolia USDC address as `usdc`, and links it with event sync from the latest block (`POST /contracts/usdc`, `POST /chains/ethereum/addresses`, `POST /chains/ethereum/addresses/usdc/contracts`).
+- **Webhooks**: an `event.emitted` webhook pushes each USDC Transfer to `POST /hooks/multibaas`. The gateway checks `X-MultiBaas-Signature` (HMAC-SHA256 over body + timestamp, 5-minute window) and keeps only transfers into a seller's payout address, so a payment flips to "verified" within seconds.
+- **Event queries**: `GET /api/reconcile` runs an ad hoc query (`POST /queries`: `Transfer` events on alias `usdc` where input 1, the recipient, is the seller) to backfill anything a webhook missed.
+
+What the seller gets (details in [API_DOCS.md](API_DOCS.md#onchain-verification-multibaas)):
+
+- every settled payment marked `verified`, `confirming`, `unverified` (the facilitator reported it, the chain doesn't show it) or `mismatch` (different amount)
+- recorded vs onchain income and a verified %, plus USDC that arrived **outside** Tollgate (not API income)
+- an action list: payments not found onchain, endpoints losing sales to upstream failures, endpoints not live yet, repeat blocked payers (Intercepta), external inflows, income concentrated in one buyer
+
+**Set up**
+
+1. Create a MultiBaas deployment on **Base Sepolia** at [console.curvegrid.com](https://console.curvegrid.com) and an admin API key (Admin → API Keys).
+2. `MULTIBAAS_URL=https://<id>.multibaas.com MULTIBAAS_ADMIN_KEY=… GATEWAY_URL=https://<gateway> bun multibaas:setup`
+3. Put the printed `MULTIBAAS_URL` and `MULTIBAAS_SYNC_FROM` into `worker/wrangler.jsonc`, set the `MULTIBAAS_API_KEY` and `MULTIBAAS_WEBHOOK_SECRET` secrets, then `bun run migrate:remote && bun run deploy`.
+
+Without `MULTIBAAS_URL` verification is off and the gateway behaves as before. Tests: `test/onchain.test.ts` covers the webhook signature and parsing, the event query, reconciliation, the action rules, and the routes against a stubbed MultiBaas.
+
+**Demo**: pay for a call on the dashboard's `/pay/:id` page, and the payment shows "Confirming" then "Onchain · block N". Send 0.01 USDC straight to the seller's wallet, and an "External inflow" action appears. The Overview's reconciliation card shows recorded vs onchain income.
+
+**Team**: _fill in: names and social handles_.
+
+**MultiBaas feedback** (draft, edit before submitting):
+
+- Linking an existing contract with `startingBlock: "latest"` meant we didn't have to index all of USDC's history, which made a busy token practical to use.
+- Ad hoc event queries (no saved query needed) were the right fit for per-seller filters.
+- The docs don't say that result rows come back with lowercased alias keys; we learned it from Curvegrid's sample app.
+- A webhook filter (e.g. only events where input 1 is in a set of addresses) would save receivers from discarding almost every USDC Transfer.
+- The supported-networks page loads its table with JavaScript, so it's hard to confirm Base Sepolia support from docs search; the sample app's chain list answered it.
+
 ## Deploy
 
 ```bash
@@ -129,6 +176,8 @@ bunx wrangler d1 create x402-gateway           # put the id into wrangler.jsonc
 bunx wrangler secret put MASTER_KEY             # openssl rand -base64 32 — encrypts seller API keys
 bunx wrangler secret put SESSION_SECRET         # openssl rand -hex 32
 bunx wrangler secret put INTERCEPTA_API_KEY     # optional: payment screening, free at intercepta.io/ethglobal
+bunx wrangler secret put MULTIBAAS_API_KEY      # optional: onchain verification (see above)
+bunx wrangler secret put MULTIBAAS_WEBHOOK_SECRET
 bun run migrate:remote
 bun run deploy
 ```

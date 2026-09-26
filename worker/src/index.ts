@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { auth, requireSeller } from "./auth";
 import { catalog } from "./routes/catalog";
 import { endpoints } from "./routes/endpoints";
+import { hooks, onchain } from "./routes/onchain";
 import { paid } from "./routes/paid";
 import { demo, screen, screenings } from "./routes/screen";
 import { stats } from "./routes/stats";
@@ -16,6 +17,7 @@ app.get("/", (c) =>
     catalog: "/catalog",
     paid: "/x/:id",
     screen: "POST /screen",
+    multibaas_webhook: "POST /hooks/multibaas",
   }),
 );
 
@@ -23,12 +25,14 @@ app.route("/catalog", catalog);
 app.route("/x", paid);
 app.route("/screen", screen);
 app.route("/demo", demo);
+app.route("/hooks", hooks);
 
 app.route("/api/auth", auth);
 app.use("/api/*", async (c, next) => (c.req.path.startsWith("/api/auth/") ? next() : requireSeller(c, next)));
 app.route("/api/endpoints", endpoints);
 app.route("/api", stats);
 app.route("/api", screenings);
+app.route("/api", onchain);
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 app.onError((err, c) => {

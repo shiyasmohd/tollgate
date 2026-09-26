@@ -3,6 +3,8 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { atomicToUsd, basescanTx, getFeed, getStats } from "../db";
+import { multibaasEnabled, syncFrom } from "../multibaas";
+import { CONFIRM_GRACE_MS, verifyCall } from "../reconcile";
 import type { AppEnv } from "../types";
 
 const HOUR = 60 * 60 * 1000;
@@ -19,6 +21,8 @@ const FeedQuery = z.object({
   before: z.coerce.number().int().positive().optional(),
   endpoint_id: z.string().max(64).optional(),
   status: z.enum(["settled", "failed"]).optional(),
+  // settled calls no onchain transfer backs (missing or a different amount)
+  verification: z.enum(["unverified"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
@@ -52,20 +56,28 @@ stats.get("/stats", async (c) => {
 stats.get("/feed", async (c) => {
   const q = FeedQuery.safeParse(c.req.query());
   if (!q.success) return c.json({ error: "invalid_query" }, 400);
+  const now = Date.now();
+  const ctx = { enabled: multibaasEnabled(c.env), syncFrom: syncFrom(c.env), now };
+  if (q.data.verification && !ctx.enabled) return c.json({ calls: [] });
   const rows = await getFeed(c.env.DB, {
     owner: c.var.seller,
     since: q.data.since,
     before: q.data.before,
     endpointId: q.data.endpoint_id,
     status: q.data.status,
+    unverified: q.data.verification ? { from: ctx.syncFrom, to: now - CONFIRM_GRACE_MS } : undefined,
     limit: q.data.limit,
   });
   return c.json({
-    calls: rows.map((r) => ({
+    calls: rows.map(({ onchain_amount, onchain_block, ...r }) => ({
       ...r,
       settled: r.settled === 1,
       amount_usd: atomicToUsd(r.amount_atomic),
       tx_url: r.tx_hash ? basescanTx(r.tx_hash) : null,
+      // null when onchain verification (MultiBaas) is off or the call wasn't settled
+      verification: verifyCall({ ...r, onchain_amount }, ctx),
+      onchain_block,
+      onchain_usd: onchain_amount === null ? null : atomicToUsd(onchain_amount),
     })),
   });
 });

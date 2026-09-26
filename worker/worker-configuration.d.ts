@@ -11,7 +11,12 @@ interface __BaseEnv_Env {
 	INTERCEPTA_FAIL_MODE: string;
 	INTERCEPTA_BLOCK_SCORE: string;
 	DEMO_ROGUE_PAY_TO: string;
+	MULTIBAAS_URL: string;
+	MULTIBAAS_SYNC_FROM: string;
+	USDC_ADDRESS: "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 	INTERCEPTA_API_KEY: string;
+	MULTIBAAS_API_KEY: string;
+	MULTIBAAS_WEBHOOK_SECRET: string;
 	MASTER_KEY: string;
 	SESSION_SECRET: string;
 }
@@ -26,7 +31,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "NETWORK" | "FACILITATOR_URL" | "UPSTREAM_TIMEOUT_MS" | "DASHBOARD_URL" | "INTERCEPTA_FAIL_MODE" | "INTERCEPTA_BLOCK_SCORE" | "DEMO_ROGUE_PAY_TO" | "INTERCEPTA_API_KEY" | "MASTER_KEY" | "SESSION_SECRET">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "NETWORK" | "FACILITATOR_URL" | "UPSTREAM_TIMEOUT_MS" | "DASHBOARD_URL" | "INTERCEPTA_FAIL_MODE" | "INTERCEPTA_BLOCK_SCORE" | "DEMO_ROGUE_PAY_TO" | "MULTIBAAS_URL" | "MULTIBAAS_SYNC_FROM" | "USDC_ADDRESS" | "INTERCEPTA_API_KEY" | "MULTIBAAS_API_KEY" | "MULTIBAAS_WEBHOOK_SECRET" | "MASTER_KEY" | "SESSION_SECRET">> {}
 }
 
 // Begin runtime types
