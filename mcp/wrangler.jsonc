@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "x402-gateway-mcp",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-15",
+  // @x402/* uses Buffer.
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  // The gateway Worker, called directly instead of over its public URL.
+  "services": [{ "binding": "GATEWAY", "service": "x402-gateway" }],
+  // The gateway's database, read for the rolling 24h spend of the buyer wallet.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "x402-gateway",
+      "database_id": "94e796b3-c73b-438d-a4c2-c9bb96910ad1"
+    }
+  ],
+  "vars": {
+    "GATEWAY_URL": "https://x402-gateway.tollgate-tokyo.workers.dev",
+    "MAX_PER_CALL_USD": "0.10",
+    "DAILY_BUDGET_USD": "1.00"
+  }
+  // Secrets (wrangler secret put / .dev.vars): BUYER_PRIVATE_KEY, MCP_TOKEN
+}

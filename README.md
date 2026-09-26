@@ -15,7 +15,7 @@ Claude ─stdio─▶ mcp/ (buyer wallet) ──x402──▶ worker/ /x/:id ─
 
 ```
 worker/    Hono on Cloudflare Workers + D1: seller API, paid proxy, catalog
-mcp/       local MCP server Claude uses to discover and pay for endpoints
+mcp/       MCP server Claude uses to discover and pay for endpoints (local stdio, or hosted on Workers)
 scripts/   seller CLI (stand-in for the dashboard) + example endpoints
 frontend.md  plan for the seller dashboard
 ```
@@ -56,6 +56,22 @@ claude mcp add x402-gateway \
 Tools: `list_paid_apis`, `paid_fetch(endpoint_id, query?, body?)`, `wallet_status`. The server refuses a payment if the quote differs from the catalog (price or payout address), exceeds `MAX_PER_CALL_USD`, or would go over `SESSION_BUDGET_USD`.
 
 To exercise the same tools without Claude: `BUYER_PRIVATE_KEY=0x... bun mcp/src/smoke.ts`.
+
+### Hosted MCP (Cloudflare Worker)
+
+`mcp/src/worker.ts` serves the same tools over Streamable HTTP at `/mcp`. It is custodial: the buyer key is a Worker secret, everyone with `MCP_TOKEN` spends from that one wallet, and spending is capped by `MAX_PER_CALL_USD` and a rolling 24h `DAILY_BUDGET_USD` (summed from the gateway's `calls` table). It reaches the gateway through a service binding.
+
+```bash
+cd mcp
+cp .dev.vars.example .dev.vars          # BUYER_PRIVATE_KEY, MCP_TOKEN (openssl rand -hex 32)
+bunx wrangler deploy                    # set GATEWAY_URL in wrangler.jsonc first
+bunx wrangler secret bulk .dev.vars
+
+claude mcp add --transport http x402-gateway https://x402-gateway-mcp.<you>.workers.dev/mcp \
+  --header "Authorization: Bearer $MCP_TOKEN"
+```
+
+For a claude.ai custom connector, which can't send headers, use `https://…/mcp?key=<MCP_TOKEN>` as the URL. Test without Claude: `MCP_URL=… MCP_TOKEN=… bun mcp/src/smoke-http.ts`.
 
 ## Deploy
 

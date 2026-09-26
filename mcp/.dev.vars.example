@@ -1,0 +1,4 @@
+# 0x… key of a wallet holding Base Sepolia USDC
+BUYER_PRIVATE_KEY=
+# openssl rand -hex 32 — clients send it as a Bearer token or ?key=
+MCP_TOKEN=
