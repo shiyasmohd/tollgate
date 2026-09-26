@@ -261,6 +261,8 @@ export interface FeedQuery {
   before?: number;
   endpointId?: string;
   status?: "settled" | "failed";
+  /** Only settled calls created in [from, to) that no matching onchain transfer backs. */
+  unverified?: { from: number; to: number };
   limit: number;
 }
 
@@ -271,16 +273,23 @@ export async function getFeed(db: D1Database, q: FeedQuery) {
   if (q.before !== undefined) { where.push("c.created_at < ?"); params.push(q.before); }
   if (q.endpointId) { where.push("c.endpoint_id = ?"); params.push(q.endpointId); }
   if (q.status) where.push(`c.settled = ${q.status === "settled" ? 1 : 0}`);
+  if (q.unverified) {
+    where.push("c.settled = 1 AND c.created_at >= ? AND c.created_at < ? AND (t.tx_hash IS NULL OR t.amount_atomic != c.amount_atomic)");
+    params.push(q.unverified.from, q.unverified.to);
+  }
   const { results } = await db
     .prepare(
       // payer_verdict: the latest Intercepta screening of this payer for this seller.
+      // onchain_*: the MultiBaas-indexed USDC transfer this call's tx_hash matched, if any.
       `SELECT c.*, e.name AS endpoint_name,
-         (SELECT s.verdict FROM screenings s WHERE s.owner = c.owner AND s.payer = c.payer ORDER BY s.created_at DESC LIMIT 1) AS payer_verdict
+         (SELECT s.verdict FROM screenings s WHERE s.owner = c.owner AND s.payer = c.payer ORDER BY s.created_at DESC LIMIT 1) AS payer_verdict,
+         t.amount_atomic AS onchain_amount, t.block_number AS onchain_block
        FROM calls c JOIN endpoints e ON e.id = c.endpoint_id
+       LEFT JOIN onchain_transfers t ON t.owner = c.owner AND t.tx_hash = lower(c.tx_hash)
        WHERE ${where.join(" AND ")} ORDER BY c.created_at DESC LIMIT ?`,
     )
     .bind(...params, q.limit)
-    .all<CallRow & { endpoint_name: string; payer_verdict: string | null }>();
+    .all<CallRow & { endpoint_name: string; payer_verdict: string | null; onchain_amount: number | null; onchain_block: number | null }>();
   return results;
 }
 
@@ -336,4 +345,122 @@ export async function countBlocked(db: D1Database, owner: string, since: number)
     .bind(owner, since)
     .first<{ n: number; amount: number }>();
   return { blocked_payments: row?.n ?? 0, blocked_atomic: row?.amount ?? 0 };
+}
+
+// ---- onchain (MultiBaas) --------------------------------------------------
+
+export interface TransferRow {
+  tx_hash: string;
+  owner: string;
+  sender: string;
+  amount_atomic: number;
+  block_number: number;
+  block_time: number;
+}
+
+/** Stores transfers once each; a transfer seen by both the webhook and a query keeps its first row. */
+export async function insertTransfers(db: D1Database, rows: TransferRow[], source: "webhook" | "query") {
+  if (rows.length === 0) return;
+  const now = Date.now();
+  const stmt = db.prepare(
+    `INSERT OR IGNORE INTO onchain_transfers (tx_hash, owner, sender, amount_atomic, block_number, block_time, source, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  await db.batch(rows.map((r) => stmt.bind(r.tx_hash, r.owner, r.sender, r.amount_atomic, r.block_number, r.block_time, source, now)));
+}
+
+/** Which of these lowercased addresses are sellers, i.e. own at least one endpoint. */
+export async function knownSellers(db: D1Database, addresses: string[]): Promise<Set<string>> {
+  const found = new Set<string>();
+  for (let i = 0; i < addresses.length; i += 50) {
+    const chunk = addresses.slice(i, i + 50);
+    const { results } = await db
+      .prepare(`SELECT DISTINCT owner FROM endpoints WHERE owner IN (${chunk.map(() => "?").join(", ")})`)
+      .bind(...chunk)
+      .all<{ owner: string }>();
+    for (const r of results) found.add(r.owner);
+  }
+  return found;
+}
+
+export type SettledCallRow = Pick<CallRow, "id" | "endpoint_id" | "payer" | "amount_atomic" | "tx_hash" | "settled" | "created_at"> & {
+  endpoint_name: string;
+  onchain_amount: number | null;
+  onchain_block: number | null;
+};
+
+/** Settled calls since a time, each with the onchain transfer its tx_hash matched, if any. */
+export async function listSettledCalls(db: D1Database, owner: string, since: number) {
+  const { results } = await db
+    .prepare(
+      `SELECT c.id, c.endpoint_id, e.name AS endpoint_name, c.payer, c.amount_atomic, c.tx_hash, c.settled, c.created_at,
+         t.amount_atomic AS onchain_amount, t.block_number AS onchain_block
+       FROM calls c
+       JOIN endpoints e ON e.id = c.endpoint_id
+       LEFT JOIN onchain_transfers t ON t.owner = c.owner AND t.tx_hash = lower(c.tx_hash)
+       WHERE c.owner = ? AND c.settled = 1 AND c.created_at >= ?
+       ORDER BY c.created_at DESC`,
+    )
+    .bind(owner, since)
+    .all<SettledCallRow>();
+  return results;
+}
+
+/** Transfers into a seller's payout address since a time; known = a Tollgate call settled it. */
+export async function listTransfers(db: D1Database, owner: string, since: number) {
+  const { results } = await db
+    .prepare(
+      `SELECT t.tx_hash, t.owner, t.sender, t.amount_atomic, t.block_number, t.block_time,
+         EXISTS (SELECT 1 FROM calls c WHERE c.owner = t.owner AND lower(c.tx_hash) = t.tx_hash) AS known
+       FROM onchain_transfers t
+       WHERE t.owner = ? AND t.block_time >= ?
+       ORDER BY t.block_time DESC`,
+    )
+    .bind(owner, since)
+    .all<TransferRow & { known: number }>();
+  return results;
+}
+
+// ---- seller health, for the action list ---------------------------------------
+
+export async function endpointHealth(db: D1Database, owner: string, since: number) {
+  const { results } = await db
+    .prepare(
+      `SELECT e.id, e.name, e.status,
+         COALESCE(SUM(c.settled), 0) AS paid,
+         COALESCE(SUM(CASE WHEN c.id IS NOT NULL AND c.settled = 0 THEN 1 ELSE 0 END), 0) AS failed
+       FROM endpoints e
+       LEFT JOIN calls c ON c.endpoint_id = e.id AND c.created_at >= ?2
+       WHERE e.owner = ?1 AND e.status != 'deleted'
+       GROUP BY e.id ORDER BY e.created_at DESC`,
+    )
+    .bind(owner, since)
+    .all<{ id: string; name: string; status: EndpointStatus; paid: number; failed: number }>();
+  return results;
+}
+
+/** Income per payer since a time, biggest first. */
+export async function payerIncome(db: D1Database, owner: string, since: number) {
+  const { results } = await db
+    .prepare(
+      `SELECT payer, SUM(amount_atomic) AS income_atomic, COUNT(*) AS calls
+       FROM calls WHERE owner = ? AND settled = 1 AND created_at >= ? AND payer IS NOT NULL
+       GROUP BY payer ORDER BY income_atomic DESC`,
+    )
+    .bind(owner, since)
+    .all<{ payer: string; income_atomic: number; calls: number }>();
+  return results;
+}
+
+/** Payers blocked at least `min` times since a time. */
+export async function repeatBlockedPayers(db: D1Database, owner: string, since: number, min: number) {
+  const { results } = await db
+    .prepare(
+      `SELECT payer, COUNT(*) AS n FROM screenings
+       WHERE owner = ? AND verdict = 'block' AND created_at >= ?
+       GROUP BY payer HAVING n >= ? ORDER BY n DESC`,
+    )
+    .bind(owner, since, min)
+    .all<{ payer: string; n: number }>();
+  return results;
 }

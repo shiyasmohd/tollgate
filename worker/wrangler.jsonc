@@ -37,6 +37,16 @@
     "ENS_REGISTRY": "0x2B14f40BD3f55564D9FA86e51EcB4aaf5B725703",
     "ENS_RESOLVER": "0x454a0c32D81463E52D79d0703f7EfcB60ed6Ba73",
     "SEPOLIA_RPC_URL": "",
+    // Curvegrid MultiBaas deployment on Base Sepolia, e.g. https://abc123.multibaas.com.
+    // With the MULTIBAAS_API_KEY secret set, settled calls are verified against USDC
+    // Transfers it indexes; MULTIBAAS_WEBHOOK_SECRET signs POST /hooks/multibaas.
+    // Empty turns onchain verification off. scripts/multibaas-setup.ts configures it.
+    "MULTIBAAS_URL": "https://mk4en6fwefeghj6yesyz64dy5e.multibaas.com",
+    // When MultiBaas started syncing USDC events (ISO date or ms). Calls before it
+    // are shown as not tracked instead of unverified.
+    "MULTIBAAS_SYNC_FROM": "2026-09-26T20:38:10.825Z",
+    // The token x402 settles in: USDC on Base Sepolia.
+    "USDC_ADDRESS": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
   }
   // Secrets (wrangler secret put / .dev.vars): MASTER_KEY (base64, 32 bytes), SESSION_SECRET,
   // INTERCEPTA_API_KEY (free at https://intercepta.io/ethglobal)

@@ -8,7 +8,8 @@
     "dev": "bun run --filter worker dev",
     "test": "bun run --filter worker test",
     "typecheck": "bun run --filter '*' typecheck",
-    "seller": "bun scripts/seller.ts"
+    "seller": "bun scripts/seller.ts",
+    "multibaas:setup": "bun scripts/multibaas-setup.ts"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",

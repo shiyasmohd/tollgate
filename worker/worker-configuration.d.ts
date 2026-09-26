@@ -15,6 +15,11 @@ interface __BaseEnv_Env {
 	ENS_REGISTRY: string;
 	ENS_RESOLVER: string;
 	SEPOLIA_RPC_URL: string;
+	MULTIBAAS_URL: string;
+	MULTIBAAS_SYNC_FROM: string;
+	USDC_ADDRESS: "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+	MULTIBAAS_API_KEY: string;
+	MULTIBAAS_WEBHOOK_SECRET: string;
 	MASTER_KEY: string;
 	SESSION_SECRET: string;
 	INTERCEPTA_API_KEY: string;
@@ -31,7 +36,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "NETWORK" | "FACILITATOR_URL" | "UPSTREAM_TIMEOUT_MS" | "DASHBOARD_URL" | "INTERCEPTA_FAIL_MODE" | "INTERCEPTA_BLOCK_SCORE" | "DEMO_ROGUE_PAY_TO" | "ENS_PARENT" | "ENS_REGISTRY" | "ENS_RESOLVER" | "SEPOLIA_RPC_URL" | "MASTER_KEY" | "SESSION_SECRET" | "INTERCEPTA_API_KEY" | "ENS_PRIVATE_KEY">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "NETWORK" | "FACILITATOR_URL" | "UPSTREAM_TIMEOUT_MS" | "DASHBOARD_URL" | "INTERCEPTA_FAIL_MODE" | "INTERCEPTA_BLOCK_SCORE" | "DEMO_ROGUE_PAY_TO" | "ENS_PARENT" | "ENS_REGISTRY" | "ENS_RESOLVER" | "SEPOLIA_RPC_URL" | "MASTER_KEY" | "SESSION_SECRET" | "INTERCEPTA_API_KEY" | "ENS_PRIVATE_KEY" | "MULTIBAAS_URL" | "MULTIBAAS_SYNC_FROM" | "USDC_ADDRESS" | "MULTIBAAS_API_KEY" | "MULTIBAAS_WEBHOOK_SECRET">> {}
 }
 
 // Begin runtime types

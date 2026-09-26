@@ -1,6 +1,6 @@
 # x402-gateway API reference
 
-The gateway is one Hono Worker (`worker/`) with four groups of routes:
+The gateway is one Hono Worker (`worker/`) with these groups of routes:
 
 | Group | Routes | Auth | Who calls it |
 |---|---|---|---|
@@ -10,6 +10,7 @@ The gateway is one Hono Worker (`worker/`) with four groups of routes:
 | [Seller auth](#seller-auth) | `/api/auth/*` | none | the dashboard / seller CLI |
 | [Seller API](#seller-api) | `/api/*` | `Authorization: Bearer <token>` | the dashboard / seller CLI |
 | [Screening](#payment-screening) | `POST /screen`, `ANY /demo/rogue`, `GET /api/screenings`, `GET /api/screen/payout` | none / seller | the MCP server, the pay page, the dashboard |
+| [Onchain verification](#onchain-verification-multibaas) | `POST /hooks/multibaas`, `GET /api/reconcile`, `GET /api/actions` | HMAC / seller | Curvegrid MultiBaas, the dashboard |
 
 Source: `worker/src/index.ts` wires the routes; handlers live in `worker/src/auth.ts` and `worker/src/routes/*.ts`.
 
@@ -671,6 +672,7 @@ Recent calls to your endpoints, newest first. The dashboard polls it with `since
 | `before` | integer (epoch ms) | | Only calls **before** this time (exclusive). Use it to page back through older calls. |
 | `endpoint_id` | string | | Limit to one endpoint |
 | `status` | `settled` \| `failed` | both | Filter by outcome |
+| `verification` | `unverified` | | Only settled calls no onchain transfer backs: missing after the 2-minute grace period, or a different amount. Empty when [onchain verification](#onchain-verification-multibaas) is off. |
 | `limit` | integer 1–100 | `20` | Page size |
 
 **Response 200**
@@ -692,6 +694,9 @@ Recent calls to your endpoints, newest first. The dashboard polls it with `since
       "upstream_status": 200,
       "latency_ms": 388,
       "payer_verdict": "allow",
+      "verification": "verified",
+      "onchain_block": 31234567,
+      "onchain_usd": "0.001",
       "created_at": 1789900123456
     }
   ]
@@ -708,6 +713,8 @@ Recent calls to your endpoints, newest first. The dashboard polls it with `since
 | `upstream_status` | The status your upstream returned (or 502/504 from the gateway) |
 | `latency_ms` | Upstream round trip only, not including payment verification or settlement |
 | `payer_verdict` | Latest Intercepta screening of this payer for you (`allow` \| `warn` \| `block`), or null if never screened |
+| `verification` | The settlement checked against the chain: `verified` \| `mismatch` \| `confirming` \| `unverified` \| `untracked` (see [below](#onchain-verification-multibaas)); null when verification is off or the call wasn't settled. It can change after the row first appears, so refresh recent rows. |
+| `onchain_block` / `onchain_usd` | The block and amount of the matching USDC transfer, or null |
 
 **Polling pattern**
 
@@ -791,6 +798,92 @@ Seller. Screens your own payout address: the `/screen` response for `pay_to` plu
 
 ---
 
+## Onchain verification (MultiBaas)
+
+A call is recorded as settled when the facilitator says so. The gateway checks each of those settlements against USDC Transfers that [Curvegrid MultiBaas](https://docs.curvegrid.com/multibaas/) indexes on Base Sepolia: an x402 settlement is a Transfer from the payer to your payout address, in the transaction the facilitator reported. Code: `worker/src/multibaas.ts` (client), `worker/src/reconcile.ts` (rules), `worker/src/actions.ts`, `worker/src/routes/onchain.ts`.
+
+| `verification` | Meaning |
+|---|---|
+| `verified` | A USDC transfer to you landed in that transaction, for the recorded amount |
+| `mismatch` | The transfer landed, for a different amount |
+| `confirming` | No transfer yet, and the call is under 2 minutes old |
+| `unverified` | No transfer after 2 minutes: you may not have been paid |
+| `untracked` | The call predates `MULTIBAAS_SYNC_FROM`, so it can't be checked |
+
+USDC that reaches your payout address without a Tollgate call is **external**: shown, but not counted as API income.
+
+Transfers arrive two ways: MultiBaas pushes each one to `POST /hooks/multibaas`, and `GET /api/reconcile` backfills your recent transfers with an ad hoc event query (at most every 30 seconds per seller), so a missed webhook doesn't leave a payment unverified. Without `MULTIBAAS_URL` and `MULTIBAAS_API_KEY` everything here reports `off` and the rest of the gateway is unchanged. `bun multibaas:setup` configures a deployment.
+
+### `POST /hooks/multibaas`
+
+MultiBaas's `event.emitted` webhook. The body is its JSON array of events; `X-MultiBaas-Signature` must be the hex HMAC-SHA256 of the raw body followed by `X-MultiBaas-Timestamp`, keyed with `MULTIBAAS_WEBHOOK_SECRET`, and the timestamp within 5 minutes. Only Transfers from `USDC_ADDRESS` into a seller's payout address are stored, once each.
+
+**Response 200** `{"received": 3, "stored": 1}`. **Errors:** `401 invalid signature`, `400 invalid json`, `413`, `503 webhook not configured`.
+
+### `GET /api/reconcile`
+
+Recorded vs onchain income. Query: `range` = `24h` (default) \| `30d`.
+
+```json
+{
+  "provider": "multibaas",
+  "enabled": true,
+  "status": "ok",
+  "error": null,
+  "range": "24h",
+  "since": 1789813723456,
+  "sync_from": 1789800000000,
+  "recorded_usd": "0.04",
+  "onchain_usd": "1.035",
+  "verified_usd": "0.02",
+  "verified_pct": 66.7,
+  "counts": { "verified": 2, "mismatch": 0, "confirming": 1, "unverified": 1, "untracked": 0 },
+  "unverified": [{ "call_id": "call_…", "endpoint_id": "ep_…", "endpoint_name": "Echo", "tx_hash": "0x…", "amount_usd": "0.01", "tx_url": "https://sepolia.basescan.org/tx/0x…", "created_at": 1789900000000 }],
+  "mismatched": [],
+  "external": [{ "tx_hash": "0x…", "from": "0x…", "amount_usd": "1", "block_number": 31234570, "block_time": 1789900100000, "tx_url": "…" }],
+  "external_usd": "1",
+  "top_payers": [{ "payer": "0x…", "amount_usd": "1", "transfers": 1 }],
+  "last_block": { "number": 31234570, "time": 1789900100000 }
+}
+```
+
+`status` is `ok`, `degraded` (MultiBaas couldn't be queried; `error` says why, and results come from webhook data only) or `off` (not configured: no totals). `verified_pct` counts only calls that could be checked by now (verified, mismatch, unverified), or null. The `*_usd` fields also come as `*_atomic` integers.
+
+### `GET /api/actions`
+
+What to do next, from the last 24 hours, most urgent first:
+
+```json
+{
+  "actions": [
+    {
+      "id": "unverified",
+      "severity": "critical",
+      "title": "1 payment not found onchain",
+      "detail": "The facilitator reported $0.0100 as settled, but MultiBaas found no USDC transfer to your payout address in that transaction. You may not have been paid.",
+      "cta": { "label": "Review payments", "href": "/payments?verification=unverified" }
+    }
+  ],
+  "verification": "ok",
+  "generated_at": 1789900123456
+}
+```
+
+| `id` | Severity | When |
+|---|---|---|
+| `unverified` | critical | Settled calls with no onchain transfer after 2 minutes (not raised while MultiBaas is unreachable) |
+| `mismatch` | critical | Onchain amount differs from the recorded one |
+| `failing:<endpoint id>` | warning | An active endpoint failed at least 20% of at least 5 calls |
+| `pending:<endpoint id>` | warning | An endpoint that isn't live yet (up to 3) |
+| `blocked` | warning | Intercepta blocked payments, naming a payer blocked 3+ times |
+| `external` | info | USDC arrived outside Tollgate |
+| `concentration` | info | One of several buyers brings at least 60% of income (5+ calls) |
+| `verification_paused` | info | MultiBaas couldn't be reached |
+
+`cta.href` is a dashboard path, or a BaseScan URL for `external`. `verification` is `ok` \| `degraded` \| `off`.
+
+---
+
 ## End-to-end walkthrough
 
 ```bash
@@ -831,3 +924,8 @@ Values that change API behaviour (`worker/wrangler.jsonc` and secrets):
 | `INTERCEPTA_FAIL_MODE` | var | `closed` | `closed`: block when Intercepta is unreachable; `open`: allow with a warning |
 | `INTERCEPTA_BLOCK_SCORE` | var | `70` | Block addresses whose toxic score is at least this |
 | `DEMO_ROGUE_PAY_TO` | var | OFAC-listed address | Payee of `/demo/rogue` |
+| `MULTIBAAS_URL` | var | empty | Curvegrid MultiBaas deployment on Base Sepolia. Empty turns onchain verification off. |
+| `MULTIBAAS_API_KEY` | secret | | MultiBaas API key allowed to run event queries |
+| `MULTIBAAS_WEBHOOK_SECRET` | secret | | Signs `POST /hooks/multibaas` (shown when the webhook is created) |
+| `MULTIBAAS_SYNC_FROM` | var | empty | When MultiBaas started syncing USDC (ISO or ms); older calls are `untracked` |
+| `USDC_ADDRESS` | var | Base Sepolia USDC | The token whose Transfers are verified |
