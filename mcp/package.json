@@ -9,22 +9,33 @@
     "start": "bun src/index.ts",
     "typecheck": "tsc --noEmit",
     "smoke": "bun src/smoke.ts",
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "dev": "vite build --config web/vite.config.ts && wrangler dev --var PUBLIC_URL:http://localhost:8787",
+    "deploy": "vite build --config web/vite.config.ts && wrangler deploy",
+    "build": "vite build --config web/vite.config.ts",
+    "privy:setup": "bun scripts/privy-setup.ts"
   },
   "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.1.0",
     "@modelcontextprotocol/sdk": "^1.30.1",
     "@modelcontextprotocol/server": "2.0.0",
+    "@privy-io/node": "^0.35.0",
+    "@privy-io/react-auth": "^3.45.0",
     "@x402/core": "2.27.0",
     "@x402/evm": "2.27.0",
     "@x402/fetch": "2.27.0",
     "agents": "^0.24.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "viem": "^2.56.9",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
     "typescript": "5.9.3",
+    "vite": "^8.3.1",
     "wrangler": "^4.141.0"
   }
 }

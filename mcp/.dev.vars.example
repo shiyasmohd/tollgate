@@ -1,4 +1,7 @@
-# 0x… key of a wallet holding Base Sepolia USDC
-BUYER_PRIVATE_KEY=
-# openssl rand -hex 32 — clients send it as a Bearer token or ?key=
-MCP_TOKEN=
+# Privy dashboard → App settings
+PRIVY_APP_ID=
+PRIVY_APP_SECRET=
+# Filled by `bun run privy:setup`
+PRIVY_SIGNER_ID=
+PRIVY_POLICY_ID=
+PRIVY_SIGNER_KEY=

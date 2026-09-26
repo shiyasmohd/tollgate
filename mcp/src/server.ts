@@ -20,11 +20,14 @@ export interface SpendLedger {
   record(amount: bigint): Promise<void>;
 }
 
+/** Any wallet that can sign EIP-712: a local key, or a Privy wallet via createViemAccount. */
+export type PayingAccount = Pick<LocalAccount, "address" | "signTypedData">;
+
 export interface ServerConfig {
   gatewayUrl: string;
   /** fetch used for every gateway request (a service binding on Workers). */
   fetch: typeof fetch;
-  account: LocalAccount | null;
+  account: PayingAccount | null;
   maxPerCall: bigint;
   budget: bigint;
   /** How the budget window reads to Claude, e.g. "session" or "24h". */
@@ -78,7 +81,7 @@ export function createServer(cfg: ServerConfig): McpServer {
   // even when several run concurrently. The gateway's 402 quote must match
   // what the catalog advertised, so a changed price or payout address is
   // refused, not paid.
-  function payingFetch(account: LocalAccount, expected: { payTo: string; amount: bigint }, spent: bigint) {
+  function payingFetch(account: PayingAccount, expected: { payTo: string; amount: bigint }, spent: bigint) {
     const client = new x402Client();
     registerExactEvmScheme(client, { signer: account, networks: [NETWORK] });
     client.setSpendControls({ maxAmountPerPayment: `$${atomicToUsd(cfg.maxPerCall)}` });

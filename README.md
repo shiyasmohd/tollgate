@@ -15,7 +15,7 @@ Claude ─stdio─▶ mcp/ (buyer wallet) ──x402──▶ worker/ /x/:id ─
 
 ```
 worker/    Hono on Cloudflare Workers + D1: seller API, paid proxy, catalog
-mcp/       MCP server Claude uses to discover and pay for endpoints (local stdio, or hosted on Workers)
+mcp/       MCP server Claude uses to discover and pay for endpoints (local stdio, or hosted on Workers with Privy wallets)
 scripts/   seller CLI (stand-in for the dashboard) + example endpoints
 frontend.md  plan for the seller dashboard
 ```
@@ -59,19 +59,29 @@ To exercise the same tools without Claude: `BUYER_PRIVATE_KEY=0x... bun mcp/src/
 
 ### Hosted MCP (Cloudflare Worker)
 
-`mcp/src/worker.ts` serves the same tools over Streamable HTTP at `/mcp`. It is custodial: the buyer key is a Worker secret, everyone with `MCP_TOKEN` spends from that one wallet, and spending is capped by `MAX_PER_CALL_USD` and a rolling 24h `DAILY_BUDGET_USD` (summed from the gateway's `calls` table). It reaches the gateway through a service binding.
+`mcp/src/worker.ts` serves the same tools over Streamable HTTP at `/mcp`, behind OAuth. Each user pays from their own [Privy](https://privy.io) embedded wallet:
+
+1. The MCP client (claude.ai connector, Claude Code) starts OAuth; `/authorize` sends the user to the `/connect/` page.
+2. They sign in with Privy (email or Google), which creates their wallet, and click **Allow payments**. That adds our key quorum as a signer on their wallet, limited by a Privy policy to USDC `transferWithAuthorization` on Base Sepolia up to $0.10.
+3. The Worker checks the signer is on their wallet and issues the OAuth grant, carrying their wallet id.
+4. `paid_fetch` signs the x402 payment through Privy with our authorization key. Privy holds the wallet key; the server never does. The user can revoke the signer at any time.
+
+Spending is also capped by `MAX_PER_CALL_USD` and a rolling 24h `DAILY_BUDGET_USD` per wallet (summed from the gateway's `calls` table). The Worker reaches the gateway through a service binding.
+
+Setup: create a Privy app (login: email + Google; embedded wallets: EVM; allowed origins: your `*.workers.dev` URL and `http://localhost:8787`).
 
 ```bash
 cd mcp
-cp .dev.vars.example .dev.vars          # BUYER_PRIVATE_KEY, MCP_TOKEN (openssl rand -hex 32)
-bunx wrangler deploy                    # set GATEWAY_URL in wrangler.jsonc first
+cp .dev.vars.example .dev.vars          # fill PRIVY_APP_ID, PRIVY_APP_SECRET
+bun run privy:setup                     # creates the signer key, key quorum and policy
+bunx wrangler kv namespace create OAUTH_KV   # put the id into wrangler.jsonc, set PUBLIC_URL / GATEWAY_URL
+bun run deploy                          # builds the connect page, deploys the Worker
 bunx wrangler secret bulk .dev.vars
 
-claude mcp add --transport http x402-gateway https://x402-gateway-mcp.<you>.workers.dev/mcp \
-  --header "Authorization: Bearer $MCP_TOKEN"
+claude mcp add --transport http x402-gateway https://x402-gateway-mcp.<you>.workers.dev/mcp
 ```
 
-For a claude.ai custom connector, which can't send headers, use `https://…/mcp?key=<MCP_TOKEN>` as the URL. Test without Claude: `MCP_URL=… MCP_TOKEN=… bun mcp/src/smoke-http.ts`.
+In claude.ai, add a custom connector with the same URL and no OAuth client id. Locally: `bun run dev` serves it at `http://localhost:8787`.
 
 ## Deploy
 

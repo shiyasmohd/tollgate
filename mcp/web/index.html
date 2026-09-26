@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Connect wallet · x402 gateway</title>
+    <style>
+      :root {
+        --bg: #fafaf9;
+        --fg: #1c1917;
+        --muted: #78716c;
+        --card: #ffffff;
+        --line: #e7e5e4;
+        --accent: #2563eb;
+        --accent-fg: #ffffff;
+        --bad: #b91c1c;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0c0a09;
+          --fg: #f5f5f4;
+          --muted: #a8a29e;
+          --card: #1c1917;
+          --line: #292524;
+          --accent: #3b82f6;
+          --bad: #f87171;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 16px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main {
+        width: 100%;
+        max-width: 420px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 28px 24px;
+      }
+      main h1 { font-size: 20px; margin: 0 0 6px; }
+      main p { margin: 0 0 14px; color: var(--muted); }
+      main ul { margin: 0 0 18px; padding-left: 18px; color: var(--muted); }
+      main li { margin-bottom: 4px; }
+      main button {
+        width: 100%;
+        padding: 11px 14px;
+        border: 0;
+        border-radius: 10px;
+        background: var(--accent);
+        color: var(--accent-fg);
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      main button:disabled { opacity: 0.6; cursor: default; }
+      main button.secondary { background: transparent; color: var(--muted); font-weight: 500; margin-top: 8px; }
+      main code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+      main .wallet { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 16px; }
+      main .error { color: var(--bad); margin-top: 12px; }
+      main a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

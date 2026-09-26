@@ -3,12 +3,15 @@
   "name": "x402-gateway-mcp",
   "main": "src/worker.ts",
   "compatibility_date": "2026-08-15",
-  // @x402/* uses Buffer.
-  "compatibility_flags": ["nodejs_compat"],
+  // @x402/* uses Buffer. global_fetch_strictly_public: the OAuth provider fetches
+  // client metadata documents from client-supplied URLs.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "observability": { "enabled": true },
+  // The connect page (vite build → web/dist/connect/), served at /connect/.
+  "assets": { "directory": "web/dist" },
   // The gateway Worker, called directly instead of over its public URL.
   "services": [{ "binding": "GATEWAY", "service": "x402-gateway" }],
-  // The gateway's database, read for the rolling 24h spend of the buyer wallet.
+  // The gateway's database, read for each wallet's rolling 24h spend.
   "d1_databases": [
     {
       "binding": "DB",
@@ -16,10 +19,15 @@
       "database_id": "94e796b3-c73b-438d-a4c2-c9bb96910ad1"
     }
   ],
+  // OAuth clients, grants and tokens, plus pending sign-ins.
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "37869a557e9740479338413847616f71" }],
   "vars": {
+    // This Worker's public origin: the OAuth issuer and the /mcp resource.
+    "PUBLIC_URL": "https://x402-gateway-mcp.tollgate-tokyo.workers.dev",
     "GATEWAY_URL": "https://x402-gateway.tollgate-tokyo.workers.dev",
     "MAX_PER_CALL_USD": "0.10",
     "DAILY_BUDGET_USD": "1.00"
   }
-  // Secrets (wrangler secret put / .dev.vars): BUYER_PRIVATE_KEY, MCP_TOKEN
+  // Secrets (wrangler secret bulk .dev.vars): PRIVY_APP_ID, PRIVY_APP_SECRET,
+  // PRIVY_SIGNER_ID, PRIVY_POLICY_ID, PRIVY_SIGNER_KEY
 }
