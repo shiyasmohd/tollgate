@@ -21,6 +21,10 @@ export interface EndpointRow {
   max_body_bytes: number;
   /** 1: screen each payer with Intercepta before accepting their payment. */
   screen_payers: number;
+  /** ENSv2 name on Sepolia once the endpoint has been active, e.g. weather.tollgate.eth. */
+  ens_name: string | null;
+  /** Label the seller chose for that name ("elevenlabs"); null: derived from the endpoint name. */
+  ens_label: string | null;
   status: EndpointStatus;
   created_at: number;
   updated_at: number;
@@ -117,13 +121,14 @@ export async function insertEndpoint(db: D1Database, row: EndpointRow) {
   await db
     .prepare(
       `INSERT INTO endpoints (id, owner, name, description, method, url, auth_type, auth_name, auth_value_enc,
-        static_headers, price_atomic, example_query, example_body, body_overrides, max_body_bytes, screen_payers, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        static_headers, price_atomic, example_query, example_body, body_overrides, max_body_bytes, screen_payers, ens_label,
+        status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       row.id, row.owner, row.name, row.description, row.method, row.url, row.auth_type, row.auth_name, row.auth_value_enc,
       row.static_headers, row.price_atomic, row.example_query, row.example_body, row.body_overrides, row.max_body_bytes,
-      row.screen_payers, row.status, row.created_at, row.updated_at,
+      row.screen_payers, row.ens_label, row.status, row.created_at, row.updated_at,
     )
     .run();
 }
@@ -138,9 +143,63 @@ export async function updateEndpoint(db: D1Database, id: string, patch: Endpoint
 
 export async function listCatalog(db: D1Database) {
   const { results } = await db
-    .prepare("SELECT * FROM endpoints WHERE status = 'active' ORDER BY created_at DESC")
-    .all<EndpointRow>();
+    .prepare(
+      `SELECT e.*, s.ens_name AS seller_ens_name FROM endpoints e
+       LEFT JOIN sellers s ON s.address = e.owner AND s.status = 'registered'
+       WHERE e.status = 'active' ORDER BY e.created_at DESC`,
+    )
+    .all<EndpointRow & { seller_ens_name: string | null }>();
   return results;
+}
+
+// ---- sellers (ENS names) ----------------------------------------------------
+
+export interface SellerRow {
+  address: string;
+  handle: string;
+  ens_name: string;
+  registry: string | null;
+  /** pending: claimed, transactions not sent yet. registered: sent (resolves a block or so later). */
+  status: "pending" | "registered";
+  created_at: number;
+  updated_at: number;
+}
+
+export function getSeller(db: D1Database, address: string) {
+  return db.prepare("SELECT * FROM sellers WHERE address = ?").bind(address).first<SellerRow>();
+}
+
+export function getSellerByHandle(db: D1Database, handle: string) {
+  return db.prepare("SELECT * FROM sellers WHERE handle = ?").bind(handle).first<SellerRow>();
+}
+
+/** Claims a handle for a seller. False if another seller holds it (UNIQUE). */
+export async function claimSeller(db: D1Database, row: SellerRow): Promise<boolean> {
+  try {
+    await db
+      .prepare(
+        `INSERT INTO sellers (address, handle, ens_name, registry, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (address) DO UPDATE SET handle = excluded.handle, ens_name = excluded.ens_name, registry = NULL,
+           status = excluded.status, created_at = excluded.created_at, updated_at = excluded.updated_at`,
+      )
+      .bind(row.address, row.handle, row.ens_name, row.registry, row.status, row.created_at, row.updated_at)
+      .run();
+    return true;
+  } catch (e) {
+    if (String(e).includes("UNIQUE")) return false;
+    throw e;
+  }
+}
+
+export async function markSellerRegistered(db: D1Database, address: string, registry: string) {
+  await db
+    .prepare("UPDATE sellers SET registry = ?, status = 'registered', updated_at = ? WHERE address = ?")
+    .bind(registry, Date.now(), address)
+    .run();
+}
+
+export async function deleteSeller(db: D1Database, address: string) {
+  await db.prepare("DELETE FROM sellers WHERE address = ?").bind(address).run();
 }
 
 // ---- calls ----------------------------------------------------------------

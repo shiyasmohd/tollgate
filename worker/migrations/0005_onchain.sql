@@ -4,7 +4,7 @@
 -- its webhook, or backfilled from an event query. A settled call is verified when a
 -- transfer with its tx_hash landed here with the same amount. One x402 settlement
 -- moves USDC to one payTo, so (tx_hash, owner) identifies a transfer.
-CREATE TABLE onchain_transfers (
+CREATE TABLE IF NOT EXISTS onchain_transfers (
   tx_hash       TEXT NOT NULL,     -- lowercased
   owner         TEXT NOT NULL,     -- Transfer.to, lowercased (= endpoints.owner)
   sender        TEXT NOT NULL,     -- Transfer.from, lowercased
@@ -15,4 +15,4 @@ CREATE TABLE onchain_transfers (
   created_at    INTEGER NOT NULL,
   PRIMARY KEY (tx_hash, owner)
 );
-CREATE INDEX onchain_owner_time ON onchain_transfers (owner, block_time);
+CREATE INDEX IF NOT EXISTS onchain_owner_time ON onchain_transfers (owner, block_time);

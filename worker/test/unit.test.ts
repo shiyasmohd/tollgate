@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { decryptSecret, encryptSecret } from "../src/crypto";
 import { atomicToUsd, type EndpointRow } from "../src/db";
+import { checkLabel, slug } from "../src/ens";
 import { prepareBody } from "../src/proxy";
 import { checkUpstreamUrl } from "../src/url-guard";
 
@@ -37,6 +38,27 @@ describe("checkUpstreamUrl", () => {
     ["not a url", false],
   ])("%s → %s", (url, ok) => {
     expect(checkUpstreamUrl(url, "gateway.example.com").ok).toBe(ok);
+  });
+});
+
+describe("ENS labels", () => {
+  it("accepts handles and endpoint labels", () => {
+    expect(checkLabel("hashir")).toEqual({ ok: true, label: "hashir" });
+    expect(checkLabel("  ElevenLabs ")).toEqual({ ok: true, label: "elevenlabs" });
+    expect(checkLabel("kling-2-5")).toEqual({ ok: true, label: "kling-2-5" });
+  });
+
+  it("rejects bad, short, long and reserved ones", () => {
+    for (const bad of ["ab", "a".repeat(33), "-lead", "trail-", "dou--ble", "has space", "émoji", "under_score"]) {
+      expect(checkLabel(bad).ok, bad).toBe(false);
+    }
+    expect(checkLabel("admin")).toEqual({ ok: false, error: 'handle "admin" is reserved' });
+    expect(checkLabel("x", "ens_label")).toMatchObject({ ok: false, error: "ens_label must be 3 to 32 characters" });
+  });
+
+  it("slugs endpoint names the same way as before", () => {
+    expect(slug("ElevenLabs voice (George)")).toBe("elevenlabs-voice-george");
+    expect(slug("  Weather API!! ")).toBe("weather-api");
   });
 });
 
