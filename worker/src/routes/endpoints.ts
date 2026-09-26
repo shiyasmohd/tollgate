@@ -8,6 +8,7 @@ import {
   getEndpointWithTotals, getOwnedEndpoint, insertEndpoint, listEndpoints, newId, toSellerEndpoint, updateEndpoint,
   type EndpointRow, type EndpointWithTotals,
 } from "../db";
+import { assignEnsName, ensEnabled, updateEnsPrice } from "../ens";
 import { callUpstream, prepareBody } from "../proxy";
 import type { AppEnv } from "../types";
 import { checkUpstreamUrl } from "../url-guard";
@@ -122,6 +123,7 @@ endpoints.post("/", async (c) => {
     body_overrides: input.body_overrides ? JSON.stringify(input.body_overrides) : null,
     max_body_bytes: input.max_body_bytes,
     screen_payers: input.screen_payers ? 1 : 0,
+    ens_name: null,
     status: "pending",
     created_at: now,
     updated_at: now,
@@ -177,6 +179,9 @@ endpoints.patch("/:id", async (c) => {
   }
 
   await updateEndpoint(c.env.DB, existing.id, patch);
+  if (existing.ens_name && ensEnabled(c.env) && patch.price_atomic !== undefined && patch.price_atomic !== existing.price_atomic) {
+    c.executionCtx.waitUntil(updateEnsPrice(c.env, existing.ens_name, patch.price_atomic).catch((e) => console.error("ENS price update failed", e)));
+  }
   const updated = await getEndpointWithTotals(c.env.DB, existing.id, c.var.seller);
   return c.json({ endpoint: withTotals(updated!, new URL(c.req.url).origin), retest_required: needsRetest });
 });
@@ -207,6 +212,10 @@ endpoints.post("/:id/test", async (c) => {
   const ok = res.status >= 200 && res.status < 300;
   const activated = ok && ep.status === "pending";
   if (activated) await updateEndpoint(c.env.DB, ep.id, { status: "active" });
+  // The first activation names the endpoint on ENS, in the background (Sepolia transactions).
+  if (activated && !ep.ens_name && ensEnabled(c.env)) {
+    c.executionCtx.waitUntil(assignEnsName(c.env, ep, new URL(c.req.url).origin).catch((e) => console.error("ENS name failed", e)));
+  }
 
   return c.json({
     ok,

@@ -35,6 +35,8 @@ catalog.get("/", async (c) => {
       example: { query: r.example_query, body: r.example_body },
       accepts_body: r.method !== "GET" && r.method !== "HEAD",
       pay_to: r.owner,
+      // Resolves on Sepolia ENSv2 to pay_to (Base Sepolia coin type); agents check the quote against it.
+      ens_name: r.ens_name,
       pay_to_risk: risk.get(r.owner) ?? null,
     })),
   });

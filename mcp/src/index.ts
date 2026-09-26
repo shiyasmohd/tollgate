@@ -8,6 +8,7 @@
 //   BUYER_PRIVATE_KEY   0x… key of a wallet holding Base Sepolia USDC (no ETH needed)
 //   MAX_PER_CALL_USD    refuse any single payment above this (default 0.10)
 //   SESSION_BUDGET_USD  refuse payments once this much has been spent (default 1.00)
+//   SEPOLIA_RPC_URL     RPC for ENS lookups of endpoint names (default: a public node)
 
 import { randomUUID } from "node:crypto";
 import { mkdtemp, open } from "node:fs/promises";
@@ -28,6 +29,7 @@ const config: ServerConfig = {
   maxPerCall: usdToAtomic(process.env.MAX_PER_CALL_USD ?? "0.10"),
   budget: usdToAtomic(process.env.SESSION_BUDGET_USD ?? "1.00"),
   budgetWindow: "session",
+  sepoliaRpcUrl: process.env.SEPOLIA_RPC_URL,
   ledger: memoryLedger(),
   // Binary responses go to an owner-only temp file; Claude gets the path.
   async storeFile(bytes, _mimeType, extension) {

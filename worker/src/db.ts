@@ -21,6 +21,8 @@ export interface EndpointRow {
   max_body_bytes: number;
   /** 1: screen each payer with Intercepta before accepting their payment. */
   screen_payers: number;
+  /** ENSv2 name on Sepolia once the endpoint has been active, e.g. weather.tollgate.eth. */
+  ens_name: string | null;
   status: EndpointStatus;
   created_at: number;
   updated_at: number;
