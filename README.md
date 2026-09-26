@@ -53,7 +53,7 @@ claude mcp add x402-gateway \
   -- bun "$PWD/mcp/src/index.ts"
 ```
 
-Tools: `list_paid_apis`, `paid_fetch(endpoint_id, query?, body?)`, `wallet_status`. The server refuses a payment if the quote differs from the catalog (price or payout address), exceeds `MAX_PER_CALL_USD`, or would go over `SESSION_BUDGET_USD`.
+Tools: `list_paid_apis`, `paid_fetch(endpoint_id, query?, body?)`, `pay_x402_url(url, method?, body?)`, `screen_counterparty(address)`, `wallet_status`. The server refuses a payment if the quote differs from the catalog (price or payout address), exceeds `MAX_PER_CALL_USD`, would go over `SESSION_BUDGET_USD`, or fails [Intercepta screening](#payment-screening-intercepta).
 
 To exercise the same tools without Claude: `BUYER_PRIVATE_KEY=0x... bun mcp/src/smoke.ts`.
 
@@ -85,6 +85,42 @@ claude mcp add --transport http x402-gateway https://x402-gateway-mcp.<you>.work
 
 In claude.ai, add a custom connector with the same URL and no OAuth client id. Locally: `bun run dev` serves it at `http://localhost:8787`.
 
+## Payment screening (Intercepta)
+
+Every payment is screened with the [Intercepta](https://intercepta.io) (Web3 Antivirus) API before money moves, on both sides:
+
+| Who | When | What is checked | Code |
+|---|---|---|---|
+| Paying agent (MCP) | quote chosen, before signing | recipient `payTo` (address quick-scan), token (token risks; anything but canonical USDC is blocked as a lookalike) | `mcp/src/server.ts` `payingFetch` → `onBeforePaymentCreation` |
+| Paying agent (MCP) | right before the wallet signs | the exact EIP-712 `TransferWithAuthorization`: local match against the quote (recipient, amount, USDC contract, expiry) + Intercepta signature analysis | `mcp/src/server.ts` `payingFetch` → wrapped `signTypedData` |
+| Buyer in the browser | before and while paying on `/pay/:id` | same checks, shown as chips | dashboard `src/lib/pay.ts`, `src/views/Pay.tsx` |
+| Seller (gateway) | before the facilitator verifies | the payer (address quick-scan); blocked payers get a 402 with the reason, nothing settles | `worker/src/paywall.ts` `screenPayer` (per endpoint: `screen_payers`) |
+| Seller | on the dashboard | own payout address (quick-scan + address-poisoning history) | `GET /api/screen/payout` |
+| Agent choosing a seller | `list_paid_apis` | each seller's `pay_to_risk` | `worker/src/routes/catalog.ts` |
+
+All Intercepta calls live in [`worker/src/screen.ts`](worker/src/screen.ts):
+
+- `GET /api/public/v2/extension/account/{address}/quick-scan`: blocks on `known_scammer`, `sanction_address`, `blacklist`, scam/phishing/rug-pull traits, or `toxicScore ≥ INTERCEPTA_BLOCK_SCORE` (70)
+- `GET /api/public/v2/extension/token-intelligence/token/{address}/risks?chainId=8453`: blocks on `action: block`
+- `POST /api/public/v2/extension/analysis/signature`: blocks on `riskGroup: High` or drainer/scam detectors
+- `GET /api/public/v1/extension/poisoning-attack/user/{address}`: payout address check
+
+The key stays in the gateway (`INTERCEPTA_API_KEY` secret); the MCP server and the pay page call the gateway's `POST /screen {pay_to?, asset?, payer?, amount?, authorization?}` and only see verdicts. Payments settle on Base Sepolia, which Intercepta doesn't cover, so addresses are screened as they are (same keys on mainnet) and testnet USDC is screened as Base mainnet USDC. Verdicts are cached for 10 minutes. Without a key every check is `skipped` and nothing is blocked; with a key, an Intercepta outage blocks (`INTERCEPTA_FAIL_MODE=closed`, default) or only warns (`open`).
+
+**Demo: one approved, one blocked.** In Claude (with the MCP connected):
+
+1. "List the paid APIs and call one": `paid_fetch` screens the seller, USDC and the authorization, pays, and shows the checks and the BaseScan link.
+2. "Pay `https://<gateway>/demo/rogue`": `pay_x402_url` gets a 402 from a payee at an OFAC-listed address (the Ronin exploiter; override with `DEMO_ROGUE_PAY_TO`). Intercepta flags it and the payment is blocked before signing. `?token=lookalike` quotes a token one hex digit off USDC instead. The demo payee never settles, so an unscreened client loses nothing either.
+3. The seller's **Payments → Blocked** tab lists payers the gateway refused.
+
+**Integration feedback** (draft, edit before submitting):
+
+- Time to first screened payment: _fill in_. The `llms.txt` index made finding the right endpoints quick.
+- Base Sepolia (84532) isn't a supported chain, so testnet x402 payments need mapping to mainnet addresses; a testnet mode would help.
+- The docs don't give the `toxicScore` scale or example responses, so the block threshold is a guess.
+- The signature scanner's `messageType` enum lists only permit types; explicit support for EIP-3009 `TransferWithAuthorization` (what x402 signs) would make it a natural fit.
+- An x402-specific endpoint (screen a whole `PAYMENT-REQUIRED` quote in one call) would replace three calls.
+
 ## Deploy
 
 ```bash
@@ -92,6 +128,7 @@ cd worker
 bunx wrangler d1 create x402-gateway           # put the id into wrangler.jsonc
 bunx wrangler secret put MASTER_KEY             # openssl rand -base64 32 — encrypts seller API keys
 bunx wrangler secret put SESSION_SECRET         # openssl rand -hex 32
+bunx wrangler secret put INTERCEPTA_API_KEY     # optional: payment screening, free at intercepta.io/ethglobal
 bun run migrate:remote
 bun run deploy
 ```
@@ -112,16 +149,20 @@ All `/api/*` routes except auth take `Authorization: Bearer <token>`.
 | `POST /api/endpoints/:id/test` | one unpaid upstream call with the example request; 2xx activates |
 | `GET /api/stats?range=24h\|30d&endpoint_id=` | income, paid/failed calls, unique payers, time series |
 | `GET /api/feed?since=&before=&endpoint_id=&status=settled\|failed&limit=` | recent calls with BaseScan links |
-| `GET /catalog` | public list of active endpoints |
+| `GET /api/screenings?verdict=allow\|warn\|block&before=&limit=` | payer screenings at the paywall, plus 30-day blocked totals |
+| `GET /api/screen/payout` | screens the signed-in seller's payout address |
+| `GET /catalog` | public list of active endpoints, with each seller's `pay_to_risk` |
+| `POST /screen` | public: screen a payment with Intercepta (see above) |
 | `ANY /x/:id` | the paid proxy |
+| `ANY /demo/rogue` | a payee screening should block (demo) |
 
-Endpoint fields: `name`, `description` (Claude reads this), `method`, `url` (https, public host), `auth` (`{type:"none"}` or `{type:"header"|"query", name, value}`), `static_headers`, `price_usd` (≤ 6 decimals), `example_query`, `example_body`, `body_overrides` (JSON merged over every buyer body — e.g. cap `max_tokens`), `max_body_bytes`. Changing `url`, `method`, `auth`, `static_headers` or `body_overrides` sends the endpoint back to `pending` until it's re-tested.
+Endpoint fields: `name`, `description` (Claude reads this), `method`, `url` (https, public host), `auth` (`{type:"none"}` or `{type:"header"|"query", name, value}`), `static_headers`, `price_usd` (≤ 6 decimals), `example_query`, `example_body`, `body_overrides` (JSON merged over every buyer body — e.g. cap `max_tokens`), `max_body_bytes`, `screen_payers` (default `true`: screen each payer with Intercepta). Changing `url`, `method`, `auth`, `static_headers` or `body_overrides` sends the endpoint back to `pending` until it's re-tested.
 
 ## How a paid request works
 
 1. Load the endpoint (404 unless active), check method and body size, apply `body_overrides` — all before quoting, so bad requests are never charged.
 2. Rate limit per endpoint + client IP.
-3. x402 middleware: no payment → 402 quote (seller's address, endpoint price); payment → verified with the facilitator.
+3. x402 middleware: no payment → 402 quote (seller's address, endpoint price); payment → the payer is screened with Intercepta (if `screen_payers`), then verified with the facilitator.
 4. Proxy to the upstream with the seller's secret injected; the secret is scrubbed from text responses.
 5. Upstream ≥ 400 → settlement is skipped (buyer not charged). Otherwise settle and return the response with `PAYMENT-RESPONSE`.
 6. The call (payer, amount, tx hash, upstream status, latency) is written to D1 for stats and the feed.

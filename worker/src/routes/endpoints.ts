@@ -52,6 +52,7 @@ const fields = {
   example_body: JsonText.nullish(),
   body_overrides: z.record(z.string(), z.unknown()).nullish(),
   max_body_bytes: z.number().int().min(0).max(1_048_576),
+  screen_payers: z.boolean(),
 };
 
 const EndpointInput = z.object({
@@ -60,6 +61,7 @@ const EndpointInput = z.object({
   auth: fields.auth.default({ type: "none" }),
   static_headers: fields.static_headers.default({}),
   max_body_bytes: fields.max_body_bytes.default(65_536),
+  screen_payers: fields.screen_payers.default(true),
 });
 
 // Built from the default-free fields: Zod 4 applies defaults even inside
@@ -119,6 +121,7 @@ endpoints.post("/", async (c) => {
     example_body: input.example_body ?? null,
     body_overrides: input.body_overrides ? JSON.stringify(input.body_overrides) : null,
     max_body_bytes: input.max_body_bytes,
+    screen_payers: input.screen_payers ? 1 : 0,
     status: "pending",
     created_at: now,
     updated_at: now,
@@ -141,6 +144,7 @@ endpoints.patch("/:id", async (c) => {
     method: input.method,
     price_atomic: input.price_usd,
     max_body_bytes: input.max_body_bytes,
+    screen_payers: input.screen_payers === undefined ? undefined : input.screen_payers ? 1 : 0,
   };
   if (input.url !== undefined) {
     const url = checkUpstreamUrl(input.url, new URL(c.req.url).host);

@@ -27,6 +27,8 @@ export interface ServerConfig {
   gatewayUrl: string;
   /** fetch used for every gateway request (a service binding on Workers). */
   fetch: typeof fetch;
+  /** fetch for x402 services outside the gateway (pay_x402_url). Defaults to the global fetch. */
+  externalFetch?: typeof fetch;
   account: PayingAccount | null;
   maxPerCall: bigint;
   budget: bigint;
@@ -66,6 +68,22 @@ interface CatalogEntry {
   example: { query: string | null; body: string | null };
   accepts_body: boolean;
   pay_to: string;
+  pay_to_risk?: { verdict: string; summary: string } | null;
+}
+
+/** The gateway's POST /screen answer (Intercepta, via the gateway, which holds the key). */
+interface Screening {
+  verdict: "allow" | "warn" | "block";
+  enabled: boolean;
+  summary: string;
+  checks: { kind: string; label: string; status: string; reason: string; subject: string }[];
+}
+
+/** Thrown from inside the x402 client when screening stops a payment before it is signed. */
+class ScreeningBlocked extends Error {
+  constructor(readonly screening: Screening) {
+    super(`Blocked by Intercepta: ${screening.summary}`);
+  }
 }
 
 const EXTENSIONS: Record<string, string> = {
@@ -98,23 +116,150 @@ export function createServer(cfg: ServerConfig): McpServer {
     return ((await res.json()) as { endpoints: CatalogEntry[] }).endpoints;
   }
 
-  // A fresh client per call, so the quote check below is bound to this call
-  // even when several run concurrently. The gateway's 402 quote must match
-  // what the catalog advertised, so a changed price or payout address is
-  // refused, not paid.
-  function payingFetch(account: PayingAccount, expected: { payTo: string; amount: bigint }, spent: bigint) {
+  /** Asks the gateway to screen a payment with Intercepta. An unreachable screen blocks. */
+  async function screen(body: Record<string, unknown>): Promise<Screening> {
+    try {
+      const res = await cfg.fetch(`${cfg.gatewayUrl}/screen`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
+      });
+      if (res.ok) return (await res.json()) as Screening;
+      throw new Error(`screen returned ${res.status}`);
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      return { verdict: "block", enabled: true, summary: `screening unavailable (${why})`, checks: [] };
+    }
+  }
+
+  // A fresh client per call, so the checks below are bound to this call even
+  // when several run concurrently. For catalog APIs the gateway's 402 quote must
+  // match what the catalog advertised (a changed price or payout address is
+  // refused, not paid). Any other x402 service has no catalog, so Intercepta
+  // screening is the only thing between the agent and the payment.
+  //
+  // Screening runs twice before anything is signed: on the quote's payTo and
+  // token when the payment is chosen, then on the exact TransferWithAuthorization
+  // the wallet is about to sign.
+  function payingFetch(
+    account: PayingAccount,
+    expected: { payTo: string; amount: bigint } | null,
+    spent: bigint,
+    screenings: Screening[],
+    doFetch: typeof fetch,
+  ) {
+    let quote: { payTo: string; amount: string } | null = null;
+    const signer: PayingAccount = {
+      address: account.address,
+      signTypedData: (async (typed: Parameters<PayingAccount["signTypedData"]>[0]) => {
+        const s = await screen({ pay_to: quote?.payTo, amount: quote?.amount, authorization: typed });
+        screenings.push(s);
+        if (s.verdict === "block") throw new ScreeningBlocked(s);
+        return account.signTypedData(typed);
+      }) as PayingAccount["signTypedData"],
+    };
     const client = new x402Client();
-    registerExactEvmScheme(client, { signer: account, networks: [NETWORK] });
+    registerExactEvmScheme(client, { signer, networks: [NETWORK] });
     client.setSpendControls({ maxAmountPerPayment: `$${atomicToUsd(cfg.maxPerCall)}` });
     client.onBeforePaymentCreation(async ({ selectedRequirements: req }) => {
       const amount = BigInt(req.amount);
-      if (req.payTo.toLowerCase() !== expected.payTo) return { abort: true, reason: "payTo differs from the catalog" };
-      if (amount > expected.amount) return { abort: true, reason: `quoted $${atomicToUsd(amount)}, catalog says $${atomicToUsd(expected.amount)}` };
+      if (expected && req.payTo.toLowerCase() !== expected.payTo) return { abort: true, reason: "payTo differs from the catalog" };
+      if (expected && amount > expected.amount) return { abort: true, reason: `quoted $${atomicToUsd(amount)}, catalog says $${atomicToUsd(expected.amount)}` };
       if (amount > cfg.maxPerCall) return { abort: true, reason: `price exceeds the per-call limit ($${atomicToUsd(cfg.maxPerCall)})` };
       if (spent + amount > cfg.budget)
         return { abort: true, reason: `${cfg.budgetWindow} budget exhausted ($${atomicToUsd(spent)} of $${atomicToUsd(cfg.budget)} spent)` };
+      const s = await screen({ pay_to: req.payTo, asset: req.asset });
+      screenings.push(s);
+      if (s.verdict === "block") return { abort: true, reason: `Blocked by Intercepta: ${s.summary}` };
+      quote = { payTo: req.payTo, amount: req.amount };
     });
-    return wrapFetchWithPayment(cfg.fetch, client);
+    return wrapFetchWithPayment(doFetch, client);
+  }
+
+  /** One line per screening check, for the tool result. */
+  function screeningReport(screenings: Screening[]): string {
+    if (!screenings.length) return "";
+    if (screenings.every((s) => !s.enabled)) return "Screening: off (the gateway has no Intercepta API key).";
+    const icon = (status: string) => (status === "pass" ? "✓" : status === "warn" ? "!" : status === "block" ? "✗" : "-");
+    // The recipient is screened with the quote and again with the authorization; show it once.
+    const checks = new Map<string, Screening["checks"][number]>();
+    for (const c of screenings.flatMap((s) => s.checks)) checks.set(`${c.kind}:${c.subject}`, c);
+    const lines = [...checks.values()].map((c) => `  ${icon(c.status)} ${c.label} ${c.subject}: ${c.reason}`);
+    for (const s of screenings) if (!s.checks.length) lines.push(`  ✗ ${s.summary}`);
+    const verdict = screenings.some((s) => s.verdict === "block")
+      ? "BLOCKED"
+      : screenings.some((s) => s.verdict === "warn")
+        ? "allowed with warnings"
+        : "passed";
+    return [`Intercepta screening ${verdict}:`, ...lines].join("\n");
+  }
+
+  /** Pays for one request and turns the response into a tool result, with the receipt and the screening. */
+  async function payAndRespond(opts: {
+    account: PayingAccount;
+    url: URL;
+    init: RequestInit;
+    expected: { payTo: string; amount: bigint } | null;
+    doFetch: typeof fetch;
+  }) {
+    const screenings: Screening[] = [];
+    const paidFetch = payingFetch(opts.account, opts.expected, await cfg.ledger.spent(), screenings, opts.doFetch);
+    let res: Response;
+    try {
+      res = await paidFetch(opts.url, opts.init);
+    } catch (e) {
+      const report = screeningReport(screenings);
+      if (screenings.some((s) => s.verdict === "block")) return text(`Payment blocked before signing. Nothing was signed or paid.\n${report}`, true);
+      const message = e instanceof Error ? e.message : String(e);
+      // x402's own spend controls only pay in known tokens, so a lookalike never reaches screening.
+      if (/allowedAssets/.test(message)) {
+        return text("Payment blocked before signing: the quote asks for a token that isn't USDC (possible lookalike). Nothing was signed or paid.", true);
+      }
+      return text(`Payment or request failed: ${message}${report ? `\n${report}` : ""}`, true);
+    }
+
+    let receipt = "Not charged.";
+    const header = res.headers.get("payment-response");
+    if (header) {
+      try {
+        const settle = decodePaymentResponseHeader(header);
+        if (settle.success) {
+          const amount = BigInt(settle.amount ?? opts.expected?.amount ?? 0);
+          await cfg.ledger.record(amount);
+          receipt = `Paid $${atomicToUsd(amount)} USDC on Base Sepolia: ${basescanTx(settle.transaction)}`;
+        }
+      } catch {
+        receipt = "Payment response was unreadable.";
+      }
+    }
+    // A 402 after paying means the payment was rejected (by the facilitator, or the
+    // seller's own payer screening); say why.
+    const required = res.status === 402 ? res.headers.get("payment-required") : null;
+    if (required) {
+      try {
+        const reason = decodePaymentRequiredHeader(required).error;
+        if (reason) receipt = `Not charged. Payment rejected: ${reason}. Check wallet_status for the USDC balance.`;
+      } catch {}
+    }
+    const head = [receipt, screeningReport(screenings)].filter(Boolean).join("\n");
+
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const mimeType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+    const raw = asText(bytes, mimeType);
+    if (raw !== null) {
+      const shown = raw.length > 8000 ? `${raw.slice(0, 8000)}\n…(truncated, ${raw.length} chars)` : raw;
+      return text(`${head}\nHTTP ${res.status}\n\n${shown}`, !res.ok);
+    }
+
+    // Binary: decoding it as text would corrupt it, so keep the bytes and hand back where they are.
+    const type = mimeType || "application/octet-stream";
+    const location = await cfg.storeFile(bytes, type, EXTENSIONS[type] ?? "bin");
+    const summary = `${head}\nHTTP ${res.status}\n\nThe API returned ${type} (${bytes.length.toLocaleString("en-US")} bytes). Saved at: ${location}`;
+    const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = [{ type: "text", text: summary }];
+    if (INLINE_IMAGES.has(type) && bytes.length <= MAX_INLINE_IMAGE_BYTES) {
+      content.push({ type: "image", data: Buffer.from(bytes).toString("base64"), mimeType: type });
+    }
+    return { content, ...(res.ok ? {} : { isError: true }) };
   }
 
   const server = new McpServer({ name: "x402-gateway", version: "0.2.0" });
@@ -137,6 +282,7 @@ export function createServer(cfg: ServerConfig): McpServer {
         method: e.method,
         example_query: e.example.query,
         example_body: e.example.body,
+        seller_risk: e.pay_to_risk ?? undefined,
       }));
       return text(JSON.stringify(menu, null, 2));
     },
@@ -166,57 +312,52 @@ export function createServer(cfg: ServerConfig): McpServer {
         init.headers = { ...init.headers, "content-type": "application/json" };
       }
 
-      const paidFetch = payingFetch(
-        cfg.account,
-        { payTo: entry.pay_to.toLowerCase(), amount: BigInt(entry.price_atomic) },
-        await cfg.ledger.spent(),
-      );
-      let res: Response;
-      try {
-        res = await paidFetch(url, init);
-      } catch (e) {
-        return text(`Payment or request failed: ${e instanceof Error ? e.message : String(e)}`, true);
-      }
+      return payAndRespond({
+        account: cfg.account,
+        url,
+        init,
+        expected: { payTo: entry.pay_to.toLowerCase(), amount: BigInt(entry.price_atomic) },
+        doFetch: cfg.fetch,
+      });
+    },
+  );
 
-      let receipt = "Not charged.";
-      const header = res.headers.get("payment-response");
-      if (header) {
-        try {
-          const settle = decodePaymentResponseHeader(header);
-          if (settle.success) {
-            const amount = BigInt(settle.amount ?? entry.price_atomic);
-            await cfg.ledger.record(amount);
-            receipt = `Paid $${atomicToUsd(amount)} USDC on Base Sepolia: ${basescanTx(settle.transaction)}`;
-          }
-        } catch {
-          receipt = "Payment response was unreadable.";
-        }
+  server.registerTool(
+    "pay_x402_url",
+    {
+      description:
+        "Pay any x402 service by URL (another agent, or a paid API not in list_paid_apis) in USDC on Base Sepolia. Before anything is signed, Intercepta screens the recipient address, the token and the exact payment authorization; a flagged payment is blocked and nothing is paid. Same per-call limit and budget as paid_fetch.",
+      inputSchema: z.object({
+        url: z.string().url().describe("The x402-protected https URL"),
+        method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional().describe("HTTP method, default GET"),
+        body: z.string().optional().describe("Request body for POST/PUT/PATCH, usually JSON"),
+      }),
+    },
+    async ({ url: raw, method = "GET", body }) => {
+      if (!cfg.account) return text("Cannot pay: no buyer wallet is configured for this MCP server.", true);
+      const url = new URL(raw);
+      // The gateway's own URLs go over cfg.fetch (a service binding on Workers).
+      const internal = url.origin === new URL(cfg.gatewayUrl).origin;
+      if (!internal && url.protocol !== "https:") return text("Only https URLs can be paid.", true);
+      const init: RequestInit = { method, headers: { accept: "application/json" } };
+      if (body !== undefined && method !== "GET" && method !== "DELETE") {
+        init.body = body;
+        init.headers = { ...init.headers, "content-type": "application/json" };
       }
-      // A 402 after paying means the facilitator rejected the payment; say why.
-      const required = res.status === 402 ? res.headers.get("payment-required") : null;
-      if (required) {
-        try {
-          const reason = decodePaymentRequiredHeader(required).error;
-          if (reason) receipt = `Not charged. Payment rejected: ${reason}. Check wallet_status for the USDC balance.`;
-        } catch {}
-      }
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      const mimeType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
-      const raw = asText(bytes, mimeType);
-      if (raw !== null) {
-        const shown = raw.length > 8000 ? `${raw.slice(0, 8000)}\n…(truncated, ${raw.length} chars)` : raw;
-        return text(`${receipt}\nHTTP ${res.status}\n\n${shown}`, !res.ok);
-      }
+      return payAndRespond({ account: cfg.account, url, init, expected: null, doFetch: internal ? cfg.fetch : (cfg.externalFetch ?? fetch) });
+    },
+  );
 
-      // Binary: decoding it as text would corrupt it, so keep the bytes and hand back where they are.
-      const type = mimeType || "application/octet-stream";
-      const location = await cfg.storeFile(bytes, type, EXTENSIONS[type] ?? "bin");
-      const summary = `${receipt}\nHTTP ${res.status}\n\nThe API returned ${type} (${bytes.length.toLocaleString("en-US")} bytes). Saved at: ${location}`;
-      const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = [{ type: "text", text: summary }];
-      if (INLINE_IMAGES.has(type) && bytes.length <= MAX_INLINE_IMAGE_BYTES) {
-        content.push({ type: "image", data: Buffer.from(bytes).toString("base64"), mimeType: type });
-      }
-      return { content, ...(res.ok ? {} : { isError: true }) };
+  server.registerTool(
+    "screen_counterparty",
+    {
+      description:
+        "Check a wallet address with Intercepta before dealing with it: sanctions, scams, phishing, rug pulls. Returns allow, warn or block with the reasons. Free; nothing is paid.",
+      inputSchema: z.object({ address: z.string().regex(/^0x[0-9a-fA-F]{40}$/).describe("0x address of the agent or seller") }),
+    },
+    async ({ address }) => {
+      const s = await screen({ pay_to: address });
+      return text(JSON.stringify({ address, verdict: s.verdict, summary: s.summary, checks: s.checks }, null, 2), s.verdict === "block");
     },
   );
 

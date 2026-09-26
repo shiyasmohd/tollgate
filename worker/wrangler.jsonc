@@ -24,7 +24,15 @@
     "UPSTREAM_TIMEOUT_MS": "30000",
     // Seller dashboard origin, e.g. https://tollgate.example.com. When set, browsers
     // that open a paid URL are sent to its /pay/:id page; empty shows a plain 402 page.
-    "DASHBOARD_URL": ""
+    "DASHBOARD_URL": "",
+    // Intercepta payment screening (needs the INTERCEPTA_API_KEY secret; off without it).
+    // closed: block payments when Intercepta can't be reached; open: allow with a warning.
+    "INTERCEPTA_FAIL_MODE": "closed",
+    // Block addresses whose Intercepta toxic score is at least this.
+    "INTERCEPTA_BLOCK_SCORE": "70",
+    // Payee of GET /demo/rogue; empty uses a known OFAC-listed address.
+    "DEMO_ROGUE_PAY_TO": ""
   }
-  // Secrets (wrangler secret put / .dev.vars): MASTER_KEY (base64, 32 bytes), SESSION_SECRET
+  // Secrets (wrangler secret put / .dev.vars): MASTER_KEY (base64, 32 bytes), SESSION_SECRET,
+  // INTERCEPTA_API_KEY (free at https://intercepta.io/ethglobal)
 }

@@ -9,6 +9,7 @@ The gateway is one Hono Worker (`worker/`) with four groups of routes:
 | [Paid proxy](#any-xid) | `ANY /x/:id` | x402 payment | buyers (Claude via `mcp/`) |
 | [Seller auth](#seller-auth) | `/api/auth/*` | none | the dashboard / seller CLI |
 | [Seller API](#seller-api) | `/api/*` | `Authorization: Bearer <token>` | the dashboard / seller CLI |
+| [Screening](#payment-screening) | `POST /screen`, `ANY /demo/rogue`, `GET /api/screenings`, `GET /api/screen/payout` | none / seller | the MCP server, the pay page, the dashboard |
 
 Source: `worker/src/index.ts` wires the routes; handlers live in `worker/src/auth.ts` and `worker/src/routes/*.ts`.
 
@@ -98,6 +99,7 @@ The public list of everything for sale: every endpoint whose status is `active`,
 {
   "network": "eip155:84532",
   "asset": "USDC",
+  "screening": "intercepta",
   "endpoints": [
     {
       "id": "ep_k3j9x0c2m1q8zt",
@@ -109,7 +111,8 @@ The public list of everything for sale: every endpoint whose status is `active`,
       "url": "http://localhost:8787/x/ep_k3j9x0c2m1q8zt",
       "example": { "query": null, "body": "{\"prompt\":\"hello\"}" },
       "accepts_body": true,
-      "pay_to": "0x1234…abcd"
+      "pay_to": "0x1234…abcd",
+      "pay_to_risk": { "verdict": "allow", "summary": "All checks passed." }
     }
   ]
 }
@@ -126,6 +129,7 @@ The public list of everything for sale: every endpoint whose status is `active`,
 | `example.body` | string \| null | Example body as a JSON **string** |
 | `accepts_body` | boolean | `false` for `GET`/`HEAD` |
 | `pay_to` | string | The seller's address (lowercase). It must match `payTo` in the 402 quote. |
+| `pay_to_risk` | object \| null | Intercepta [screening](#payment-screening) of `pay_to` (`verdict`, `summary`); null when screening is off. Top-level `screening` is `"intercepta"` or null. |
 
 ---
 
@@ -380,6 +384,7 @@ Every `/api/endpoints` route returns endpoints in this shape. The upstream secre
 | `example_body` | string \| null | A JSON **string**, used by `/test` and shown in the catalog |
 | `body_overrides` | object \| null | Shallow-merged over every buyer body |
 | `max_body_bytes` | integer | Largest buyer body accepted |
+| `screen_payers` | boolean | Screen each payer with Intercepta before accepting their payment |
 | `status` | `pending` \| `active` \| `paused` | See [lifecycle](#endpoint-lifecycle) |
 | `created_at` / `updated_at` | integer | Epoch ms |
 | `calls` | integer | All-time **settled** calls |
@@ -451,6 +456,7 @@ Creates an endpoint in status `pending`. Run [`/test`](#post-apiendpointsidtest)
 | `example_body` | string \| object \| array \| null | no | `null` | Objects and arrays are stored as JSON text, ≤ 65536 chars |
 | `body_overrides` | object \| null | no | `null` | Merged over every buyer body, and over `example_body` in `/test` |
 | `max_body_bytes` | integer | no | `65536` | 0 – 1048576 |
+| `screen_payers` | boolean | no | `true` | Changing it needs no retest |
 
 **Example**
 
@@ -685,6 +691,7 @@ Recent calls to your endpoints, newest first. The dashboard polls it with `since
       "tx_url": "https://sepolia.basescan.org/tx/0x5e1c…",
       "upstream_status": 200,
       "latency_ms": 388,
+      "payer_verdict": "allow",
       "created_at": 1789900123456
     }
   ]
@@ -700,6 +707,7 @@ Recent calls to your endpoints, newest first. The dashboard polls it with `since
 | `tx_hash` / `tx_url` | The settlement transaction and its BaseScan link, or null |
 | `upstream_status` | The status your upstream returned (or 502/504 from the gateway) |
 | `latency_ms` | Upstream round trip only, not including payment verification or settlement |
+| `payer_verdict` | Latest Intercepta screening of this payer for you (`allow` \| `warn` \| `block`), or null if never screened |
 
 **Polling pattern**
 
@@ -715,6 +723,71 @@ setInterval(async () => {
 To page back, pass `before=<created_at of the oldest row shown>`.
 
 **Errors:** `400 {"error":"invalid_query"}`.
+
+---
+
+## Payment screening
+
+Payments are screened with the Intercepta (Web3 Antivirus) API. The key lives only in the gateway (`INTERCEPTA_API_KEY`). Without it every check comes back `skipped` and nothing is blocked. Implementation: `worker/src/screen.ts`.
+
+### `POST /screen`
+
+Public, CORS open, rate limited per IP. Screens whichever parts of a payment are given, in parallel.
+
+| Field | Type | Check |
+|---|---|---|
+| `pay_to` | address | recipient: address quick-scan |
+| `asset` | address | token: must be canonical USDC, then token risks on Base mainnet |
+| `payer` | address | payer: address quick-scan |
+| `amount` | atomic string | compared with the authorization's `value` |
+| `authorization` | EIP-712 typed data | must be a `TransferWithAuthorization` on USDC to `pay_to` for `amount`, valid < 24h; then Intercepta signature analysis |
+
+**Response 200**
+
+```json
+{
+  "verdict": "block",
+  "enabled": true,
+  "provider": "intercepta",
+  "summary": "Recipient flagged sanction_address",
+  "checks": [
+    { "kind": "pay_to", "label": "Recipient", "subject": "0x098B…2F96", "status": "block", "reason": "flagged sanction_address", "score": 95, "flags": ["sanction_address"] },
+    { "kind": "token", "label": "Token", "subject": "0x036C…CF7e", "status": "pass", "reason": "USDC verified", "score": "neutral", "flags": [] }
+  ]
+}
+```
+
+`verdict` is `block` if any check blocks, `warn` if any warns, else `allow`. `status` per check: `pass` | `warn` | `block` | `skipped`. When Intercepta can't be reached a check blocks (`INTERCEPTA_FAIL_MODE=closed`) or warns (`open`).
+
+**Errors:** `400` invalid body or nothing to screen, `429 {"error":"rate_limited"}`.
+
+### Payer screening at the paywall
+
+On a paid retry to `/x/:id` whose endpoint has `screen_payers`, the payer from the signed authorization is screened before the facilitator verifies it. A blocked payer gets a `402` whose `PAYMENT-REQUIRED` `error` is `payer_blocked_by_intercepta: <summary>`. Nothing settles and the upstream isn't called. Every screening is stored for `/api/screenings`.
+
+### `ANY /demo/rogue`
+
+An x402 payee that screening should block, for demos. Its 402 asks $0.01 USDC on Base Sepolia to an OFAC-listed address (`DEMO_ROGUE_PAY_TO` overrides), or with `?token=lookalike` in a token one hex digit off USDC. It never settles: a signed retry gets the same 402 with `error: "this demo payee never settles"`.
+
+### `GET /api/screenings`
+
+Seller. Payer screenings at your paywall, newest first. Query: `verdict` (`allow` | `warn` | `block`), `before` (epoch ms), `limit` (1–100, default 20).
+
+```json
+{
+  "enabled": true,
+  "blocked_30d": 1,
+  "blocked_30d_usd": "0.02",
+  "screenings": [
+    { "id": "scr_…", "endpoint_id": "ep_…", "endpoint_name": "Echo", "payer": "0xbad…", "verdict": "block",
+      "summary": "Payer flagged known_scammer", "checks": [ … ], "amount_atomic": 20000, "amount_usd": "0.02", "created_at": 1789900123456 }
+  ]
+}
+```
+
+### `GET /api/screen/payout`
+
+Seller. Screens your own payout address: the `/screen` response for `pay_to` plus `address` and `poisoned` (Intercepta's address-poisoning history: `true`, `false`, or `null` when unknown or off).
 
 ---
 
@@ -754,3 +827,7 @@ Values that change API behaviour (`worker/wrangler.jsonc` and secrets):
 | `RL` | rate limit binding | 60 / 60 s | Paid-route limit per endpoint and IP |
 | `MASTER_KEY` | secret | | Base64, 32 bytes. AES-GCM key for seller secrets. Rotating it makes stored secrets unreadable. |
 | `SESSION_SECRET` | secret | | HS256 key for seller bearer tokens. Rotating it signs every seller out. |
+| `INTERCEPTA_API_KEY` | secret | | Intercepta API key. Empty turns payment screening off. |
+| `INTERCEPTA_FAIL_MODE` | var | `closed` | `closed`: block when Intercepta is unreachable; `open`: allow with a warning |
+| `INTERCEPTA_BLOCK_SCORE` | var | `70` | Block addresses whose toxic score is at least this |
+| `DEMO_ROGUE_PAY_TO` | var | OFAC-listed address | Payee of `/demo/rogue` |

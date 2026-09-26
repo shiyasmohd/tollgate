@@ -2,3 +2,6 @@
 MASTER_KEY=
 # openssl rand -hex 32
 SESSION_SECRET=
+# Intercepta (Web3 Antivirus) API key for payment screening: https://intercepta.io/ethglobal
+# Empty turns screening off.
+INTERCEPTA_API_KEY=

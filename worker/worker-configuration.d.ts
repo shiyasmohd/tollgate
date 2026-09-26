@@ -8,6 +8,10 @@ interface __BaseEnv_Env {
 	FACILITATOR_URL: "https://x402.org/facilitator";
 	UPSTREAM_TIMEOUT_MS: "30000";
 	DASHBOARD_URL: string;
+	INTERCEPTA_FAIL_MODE: string;
+	INTERCEPTA_BLOCK_SCORE: string;
+	DEMO_ROGUE_PAY_TO: string;
+	INTERCEPTA_API_KEY: string;
 	MASTER_KEY: string;
 	SESSION_SECRET: string;
 }
@@ -22,7 +26,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "NETWORK" | "FACILITATOR_URL" | "UPSTREAM_TIMEOUT_MS" | "DASHBOARD_URL" | "MASTER_KEY" | "SESSION_SECRET">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "NETWORK" | "FACILITATOR_URL" | "UPSTREAM_TIMEOUT_MS" | "DASHBOARD_URL" | "INTERCEPTA_FAIL_MODE" | "INTERCEPTA_BLOCK_SCORE" | "DEMO_ROGUE_PAY_TO" | "INTERCEPTA_API_KEY" | "MASTER_KEY" | "SESSION_SECRET">> {}
 }
 
 // Begin runtime types

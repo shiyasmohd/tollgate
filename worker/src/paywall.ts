@@ -11,7 +11,8 @@ import { paymentMiddleware } from "@x402/hono";
 import { HTTPFacilitatorClient, x402ResourceServer, type HTTPRequestContext, type PaywallProvider } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { getAddress } from "viem";
-import { atomicToUsd, type EndpointRow } from "./db";
+import { atomicToUsd, insertScreening, newId, type EndpointRow } from "./db";
+import { screenPayment, screeningEnabled } from "./screen";
 import type { AppEnv } from "./types";
 
 const routeEndpoints = new Map<string, EndpointRow>();
@@ -61,7 +62,8 @@ p{margin:8px 0;color:#4a5160}a{color:#4d7c0f;font-weight:600}code{font-size:13px
 
 function build(env: Env): MiddlewareHandler {
   const server = new x402ResourceServer(new HTTPFacilitatorClient({ url: env.FACILITATOR_URL }))
-    .register(env.NETWORK, new ExactEvmScheme());
+    .register(env.NETWORK, new ExactEvmScheme())
+    .onBeforeVerify((ctx) => screenPayer(env, ctx));
 
   return paymentMiddleware(
     {
@@ -89,6 +91,40 @@ function build(env: Env): MiddlewareHandler {
     undefined,
     paywallPage(env),
   );
+}
+
+type VerifyContext = Parameters<Parameters<x402ResourceServer["onBeforeVerify"]>[0]>[0];
+
+/**
+ * Seller-side screening: before the facilitator verifies a payment, the payer is
+ * checked with Intercepta. A blocked payer gets a 402 whose error names the
+ * reason, nothing is settled and the upstream is never called. Every screening
+ * is logged so the dashboard can show blocked payments.
+ */
+async function screenPayer(env: Env, ctx: VerifyContext): Promise<void | { abort: true; reason: string; message?: string }> {
+  if (!screeningEnabled(env)) return;
+  const request = (ctx.transportContext as { request?: HTTPRequestContext } | undefined)?.request;
+  if (!request) return;
+  const ep = endpointFor(request);
+  if (!ep.screen_payers) return;
+  const payer = (ctx.paymentPayload.payload as { authorization?: { from?: string } }).authorization?.from;
+  if (!payer) return;
+
+  const result = await screenPayment(env, { payer });
+  await insertScreening(env.DB, {
+    id: newId("scr"),
+    endpoint_id: ep.id,
+    owner: ep.owner,
+    payer: payer.toLowerCase(),
+    verdict: result.verdict,
+    summary: result.summary,
+    checks: JSON.stringify(result.checks),
+    amount_atomic: Number(ctx.requirements.amount ?? 0),
+    created_at: Date.now(),
+  }).catch((e) => console.error("insertScreening failed", e));
+  if (result.verdict === "block") {
+    return { abort: true, reason: `payer_blocked_by_intercepta: ${result.summary}`, message: result.summary };
+  }
 }
 
 // Built on first use rather than at module scope: construction starts a fetch to

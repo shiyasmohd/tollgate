@@ -19,6 +19,8 @@ export interface EndpointRow {
   example_body: string | null;
   body_overrides: string | null;
   max_body_bytes: number;
+  /** 1: screen each payer with Intercepta before accepting their payment. */
+  screen_payers: number;
   status: EndpointStatus;
   created_at: number;
   updated_at: number;
@@ -53,9 +55,10 @@ export const basescanTx = (hash: string) => `https://sepolia.basescan.org/tx/${h
 
 /** The seller-facing shape of an endpoint: never includes the secret. */
 export function toSellerEndpoint(row: EndpointRow) {
-  const { auth_value_enc, static_headers, body_overrides, ...rest } = row;
+  const { auth_value_enc, static_headers, body_overrides, screen_payers, ...rest } = row;
   return {
     ...rest,
+    screen_payers: screen_payers !== 0,
     auth_set: auth_value_enc != null,
     static_headers: JSON.parse(static_headers) as Record<string, string>,
     body_overrides: body_overrides ? (JSON.parse(body_overrides) as Record<string, unknown>) : null,
@@ -114,13 +117,13 @@ export async function insertEndpoint(db: D1Database, row: EndpointRow) {
   await db
     .prepare(
       `INSERT INTO endpoints (id, owner, name, description, method, url, auth_type, auth_name, auth_value_enc,
-        static_headers, price_atomic, example_query, example_body, body_overrides, max_body_bytes, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        static_headers, price_atomic, example_query, example_body, body_overrides, max_body_bytes, screen_payers, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       row.id, row.owner, row.name, row.description, row.method, row.url, row.auth_type, row.auth_name, row.auth_value_enc,
       row.static_headers, row.price_atomic, row.example_query, row.example_body, row.body_overrides, row.max_body_bytes,
-      row.status, row.created_at, row.updated_at,
+      row.screen_payers, row.status, row.created_at, row.updated_at,
     )
     .run();
 }
@@ -211,10 +214,67 @@ export async function getFeed(db: D1Database, q: FeedQuery) {
   if (q.status) where.push(`c.settled = ${q.status === "settled" ? 1 : 0}`);
   const { results } = await db
     .prepare(
-      `SELECT c.*, e.name AS endpoint_name FROM calls c JOIN endpoints e ON e.id = c.endpoint_id
+      // payer_verdict: the latest Intercepta screening of this payer for this seller.
+      `SELECT c.*, e.name AS endpoint_name,
+         (SELECT s.verdict FROM screenings s WHERE s.owner = c.owner AND s.payer = c.payer ORDER BY s.created_at DESC LIMIT 1) AS payer_verdict
+       FROM calls c JOIN endpoints e ON e.id = c.endpoint_id
        WHERE ${where.join(" AND ")} ORDER BY c.created_at DESC LIMIT ?`,
     )
     .bind(...params, q.limit)
-    .all<CallRow & { endpoint_name: string }>();
+    .all<CallRow & { endpoint_name: string; payer_verdict: string | null }>();
   return results;
+}
+
+// ---- screenings -----------------------------------------------------------
+
+export interface ScreeningRow {
+  id: string;
+  endpoint_id: string;
+  owner: string;
+  payer: string;
+  verdict: "allow" | "warn" | "block";
+  summary: string;
+  checks: string;
+  amount_atomic: number;
+  created_at: number;
+}
+
+export async function insertScreening(db: D1Database, row: ScreeningRow) {
+  await db
+    .prepare(
+      `INSERT INTO screenings (id, endpoint_id, owner, payer, verdict, summary, checks, amount_atomic, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(row.id, row.endpoint_id, row.owner, row.payer, row.verdict, row.summary, row.checks, row.amount_atomic, row.created_at)
+    .run();
+}
+
+export interface ScreeningQuery {
+  owner: string;
+  verdict?: "allow" | "warn" | "block";
+  before?: number;
+  limit: number;
+}
+
+export async function listScreenings(db: D1Database, q: ScreeningQuery) {
+  const where = ["s.owner = ?"];
+  const params: (string | number)[] = [q.owner];
+  if (q.verdict) { where.push("s.verdict = ?"); params.push(q.verdict); }
+  if (q.before !== undefined) { where.push("s.created_at < ?"); params.push(q.before); }
+  const { results } = await db
+    .prepare(
+      `SELECT s.*, e.name AS endpoint_name FROM screenings s JOIN endpoints e ON e.id = s.endpoint_id
+       WHERE ${where.join(" AND ")} ORDER BY s.created_at DESC LIMIT ?`,
+    )
+    .bind(...params, q.limit)
+    .all<ScreeningRow & { endpoint_name: string }>();
+  return results;
+}
+
+export async function countBlocked(db: D1Database, owner: string, since: number) {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS n, COALESCE(SUM(amount_atomic), 0) AS amount FROM screenings WHERE owner = ? AND verdict = 'block' AND created_at >= ?")
+    .bind(owner, since)
+    .first<{ n: number; amount: number }>();
+  return { blocked_payments: row?.n ?? 0, blocked_atomic: row?.amount ?? 0 };
 }

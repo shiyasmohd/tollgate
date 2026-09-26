@@ -238,3 +238,37 @@ describe("stats", () => {
     expect(listed.endpoints[0]).toMatchObject({ calls: 2, income_atomic: 40_000 });
   });
 });
+
+describe("screening", () => {
+  it("screens payers by default, and the seller can turn it off without a retest", async () => {
+    const { api } = await login();
+    const id = await createActive(api);
+    const { endpoint } = await (await api(`/api/endpoints/${id}`)).json<{ endpoint: { screen_payers: boolean } }>();
+    expect(endpoint.screen_payers).toBe(true);
+    const off = await api(`/api/endpoints/${id}`, { method: "PATCH", body: JSON.stringify({ screen_payers: false }) });
+    expect(await off.json()).toMatchObject({ endpoint: { screen_payers: false }, retest_required: false });
+  });
+
+  it("lists blocked payers and marks them in the feed", async () => {
+    const { account, api } = await login();
+    const id = await createActive(api);
+    const owner = account.address.toLowerCase();
+    const now = Date.now();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO screenings (id, endpoint_id, owner, payer, verdict, summary, checks, amount_atomic, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind("s1", id, owner, "0xbad", "block", "Payer flagged known_scammer", "[]", 20_000, now - 100),
+      env.DB.prepare(
+        `INSERT INTO calls (id, endpoint_id, owner, payer, amount_atomic, tx_hash, settled, upstream_status, latency_ms, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind("c9", id, owner, "0xbad", 20_000, "0xt9", 1, 200, 10, now - 50),
+    ]);
+
+    const list = await (await api("/api/screenings?verdict=block")).json<Record<string, unknown>>();
+    expect(list).toMatchObject({ enabled: false, blocked_30d: 1, blocked_30d_usd: "0.02" });
+    expect(list.screenings).toMatchObject([{ id: "s1", payer: "0xbad", summary: "Payer flagged known_scammer", endpoint_name: "Echo", checks: [] }]);
+    const feed = await (await api("/api/feed")).json<{ calls: { id: string; payer_verdict: string | null }[] }>();
+    expect(feed.calls.find((c) => c.id === "c9")!.payer_verdict).toBe("block");
+  });
+});
