@@ -78,9 +78,14 @@ if (chain.result.chainID !== BASE_SEPOLIA) {
 console.log(`✓ Base Sepolia deployment at block ${chain.result.blockNumber}`);
 const syncFrom = new Date().toISOString();
 
-await step("USDC ABI in the contract library", () =>
-  mb("POST", `/contracts/${LABEL}`, { label: LABEL, contractName: "FiatToken", version: "1.0", rawAbi: JSON.stringify(ABI) }),
-);
+// The library stores bytecode with every contract, but USDC is only read here, so
+// its bytecode is left empty ("0x", or "" if MultiBaas rejects that).
+await step("USDC ABI in the contract library", async () => {
+  const add = (bin: string) =>
+    mb("POST", `/contracts/${LABEL}`, { label: LABEL, contractName: "FiatToken", version: "1.0", bin, rawAbi: JSON.stringify(ABI) });
+  const first = await add("0x");
+  return first.status === 400 && !/exist/i.test(first.message ?? "") ? add("") : first;
+});
 await step(`alias "${LABEL}" → ${USDC}`, () => mb("POST", "/chains/ethereum/addresses", { alias: LABEL, address: USDC }));
 await step("link USDC and sync its events from the latest block", () =>
   mb("POST", `/chains/ethereum/addresses/${LABEL}/contracts`, { label: LABEL, version: "1.0", startingBlock: "latest" }),
