@@ -66,6 +66,8 @@ To exercise the same tools without Claude: `BUYER_PRIVATE_KEY=0x... bun mcp/src/
 3. The Worker checks the signer is on their wallet and issues the OAuth grant, carrying their wallet id.
 4. `paid_fetch` signs the x402 payment through Privy with our authorization key. Privy holds the wallet key; the server never does. The user can revoke the signer at any time.
 
+Non-text responses (audio, images, PDFs…) are stored in the R2 bucket `x402-gateway-files` under `responses/` and returned to Claude as a `/files/<id>` download link, valid for 24h; a bucket lifecycle rule deletes them after a day. Files always download; only media types that can't run script keep their content type. (The local stdio server writes them to a private temp directory instead.)
+
 Spending is also capped by `MAX_PER_CALL_USD` and a rolling 24h `DAILY_BUDGET_USD` per wallet (summed from the gateway's `calls` table). The Worker reaches the gateway through a service binding.
 
 Setup: create a Privy app (login: email + Google; embedded wallets: EVM; allowed origins: your `*.workers.dev` URL and `http://localhost:8787`).

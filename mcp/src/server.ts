@@ -33,6 +33,8 @@ export interface ServerConfig {
   /** How the budget window reads to Claude, e.g. "session" or "24h". */
   budgetWindow: string;
   ledger: SpendLedger;
+  /** Keeps a binary response (audio, images, PDFs…) and returns where to get it: a URL or a file path. */
+  storeFile: (bytes: Uint8Array, mimeType: string, extension: string) => Promise<string>;
 }
 
 export function usdToAtomic(usd: string): bigint {
@@ -64,6 +66,25 @@ interface CatalogEntry {
   example: { query: string | null; body: string | null };
   accepts_body: boolean;
   pay_to: string;
+}
+
+const EXTENSIONS: Record<string, string> = {
+  "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/ogg": "ogg", "audio/webm": "webm",
+  "audio/aac": "aac", "audio/flac": "flac", "audio/mp4": "m4a", "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif",
+  "image/webp": "webp", "application/pdf": "pdf", "application/zip": "zip", "video/mp4": "mp4",
+};
+// Claude can look at these directly, so they also go back inline.
+const INLINE_IMAGES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const MAX_INLINE_IMAGE_BYTES = 1_000_000;
+
+/** The response body as text, or null when it's binary (declared non-text, or not valid UTF-8). */
+function asText(bytes: Uint8Array, mimeType: string): string | null {
+  if (/^(audio|image|video)\/|^application\/(pdf|zip|octet-stream)/.test(mimeType)) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
 }
 
 const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], ...(isError ? { isError } : {}) });
@@ -125,7 +146,7 @@ export function createServer(cfg: ServerConfig): McpServer {
     "paid_fetch",
     {
       description:
-        "Call a paid API from list_paid_apis, paying its per-call price in USDC on Base Sepolia. Returns the API's response and the payment transaction. You are only charged if the API succeeds.",
+        "Call a paid API from list_paid_apis, paying its per-call price in USDC on Base Sepolia. Returns the API's response and the payment transaction. Non-text responses (audio, images, PDFs) are saved and returned as a link (valid 24h) or file path to pass on to the user. You are only charged if the API succeeds.",
       inputSchema: z.object({
         endpoint_id: z.string().describe("endpoint_id from list_paid_apis"),
         query: z.string().optional().describe("Query string without '?', e.g. 'q=lisbon&limit=3'"),
@@ -179,9 +200,23 @@ export function createServer(cfg: ServerConfig): McpServer {
           if (reason) receipt = `Not charged. Payment rejected: ${reason}. Check wallet_status for the USDC balance.`;
         } catch {}
       }
-      const raw = await res.text();
-      const shown = raw.length > 8000 ? `${raw.slice(0, 8000)}\n…(truncated, ${raw.length} chars)` : raw;
-      return text(`${receipt}\nHTTP ${res.status}\n\n${shown}`, !res.ok);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      const mimeType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+      const raw = asText(bytes, mimeType);
+      if (raw !== null) {
+        const shown = raw.length > 8000 ? `${raw.slice(0, 8000)}\n…(truncated, ${raw.length} chars)` : raw;
+        return text(`${receipt}\nHTTP ${res.status}\n\n${shown}`, !res.ok);
+      }
+
+      // Binary: decoding it as text would corrupt it, so keep the bytes and hand back where they are.
+      const type = mimeType || "application/octet-stream";
+      const location = await cfg.storeFile(bytes, type, EXTENSIONS[type] ?? "bin");
+      const summary = `${receipt}\nHTTP ${res.status}\n\nThe API returned ${type} (${bytes.length.toLocaleString("en-US")} bytes). Saved at: ${location}`;
+      const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = [{ type: "text", text: summary }];
+      if (INLINE_IMAGES.has(type) && bytes.length <= MAX_INLINE_IMAGE_BYTES) {
+        content.push({ type: "image", data: Buffer.from(bytes).toString("base64"), mimeType: type });
+      }
+      return { content, ...(res.ok ? {} : { isError: true }) };
     },
   );
 

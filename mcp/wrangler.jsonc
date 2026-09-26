@@ -21,6 +21,9 @@
   ],
   // OAuth clients, grants and tokens, plus pending sign-ins.
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "37869a557e9740479338413847616f71" }],
+  // Non-text API responses (audio, images, PDFs…) from paid_fetch, under responses/.
+  // A bucket lifecycle rule deletes them after 1 day.
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "x402-gateway-files" }],
   "vars": {
     // This Worker's public origin: the OAuth issuer and the /mcp resource.
     "PUBLIC_URL": "https://x402-gateway-mcp.tollgate-tokyo.workers.dev",

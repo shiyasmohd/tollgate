@@ -27,6 +27,8 @@ type WorkerEnv = Env & { OAUTH_PROVIDER: OAuthHelpers };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PENDING_TTL_S = 15 * 60;
+// Links stop working after this; the bucket's lifecycle rule deletes the object soon after.
+const FILE_TTL_MS = DAY_MS;
 
 const privyClient = (env: Env) => new PrivyClient({ appId: env.PRIVY_APP_ID, appSecret: env.PRIVY_APP_SECRET });
 
@@ -66,6 +68,15 @@ const mcpHandler = {
         budget: usdToAtomic(env.DAILY_BUDGET_USD),
         budgetWindow: "rolling 24h",
         ledger: d1Ledger(env.DB, props.address),
+        // Binary responses go to R2 for a day, behind an unguessable link.
+        async storeFile(bytes, mimeType, extension) {
+          const name = `${crypto.randomUUID()}.${extension}`;
+          await env.FILES.put(`responses/${name}`, bytes, {
+            httpMetadata: { contentType: mimeType },
+            customMetadata: { payer: props.address, userId: props.userId },
+          });
+          return `${env.PUBLIC_URL}/files/${name}`;
+        },
       });
     return createMcpHandler(server)(request, env, ctx);
   },
@@ -149,9 +160,35 @@ async function completeAuthorization(request: Request, env: WorkerEnv): Promise<
   return Response.json({ redirectTo, address: wallet.address });
 }
 
+// Seller APIs choose these bytes, and this origin also hosts the connect page,
+// so files always download, and only media types that can't run script keep their type.
+const SAFE_TYPES = /^(audio\/[a-z0-9.+-]+|image\/(png|jpeg|gif|webp)|video\/mp4|application\/pdf)$/;
+
+/** A binary API response saved by paid_fetch. */
+async function serveFile(name: string, env: Env): Promise<Response> {
+  const object = await env.FILES.get(`responses/${name}`);
+  if (!object || Date.now() - object.uploaded.getTime() > FILE_TTL_MS) {
+    return Response.json({ error: "This file expired or never existed." }, { status: 404 });
+  }
+  const mimeType = object.httpMetadata?.contentType ?? "";
+  return new Response(object.body, {
+    headers: {
+      "content-type": SAFE_TYPES.test(mimeType) ? mimeType : "application/octet-stream",
+      "content-length": String(object.size),
+      "content-disposition": `attachment; filename="${name}"`,
+      "content-security-policy": "sandbox; default-src 'none'",
+      "cache-control": "private, max-age=3600",
+      etag: object.httpEtag,
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
 const defaultHandler: ExportedHandler<WorkerEnv> = {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
+    const file = pathname.match(/^\/files\/([0-9a-f-]{36}\.[a-z0-9]{1,5})$/);
+    if (file && request.method === "GET") return serveFile(file[1]!, env);
     if (pathname === "/authorize" && request.method === "GET") return authorize(request, env);
     if (pathname === "/authorize/session" && request.method === "GET") return connectSession(request, env);
     if (pathname === "/authorize/complete" && request.method === "POST") return completeAuthorization(request, env);
