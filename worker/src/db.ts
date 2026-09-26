@@ -178,7 +178,9 @@ export async function getStats(db: D1Database, q: StatsQuery) {
       .bind(...params),
     db
       .prepare(
-        `SELECT (created_at / ?) * ? AS bucket,
+        // CAST keeps this integer division even if the bound bucket size arrives as REAL,
+        // which would otherwise make every row its own "bucket" and zero out the chart.
+        `SELECT CAST(created_at / ? AS INTEGER) * ? AS bucket,
            SUM(CASE WHEN settled = 1 THEN amount_atomic ELSE 0 END) AS income_atomic,
            SUM(settled) AS calls
          FROM calls WHERE ${filter} GROUP BY bucket ORDER BY bucket`,

@@ -223,7 +223,12 @@ describe("stats", () => {
 
     const stats = await (await api("/api/stats")).json<Record<string, unknown>>();
     expect(stats).toMatchObject({ income_atomic: 40_000, income_usd: "0.04", paid_calls: 2, failed_calls: 1, unique_payers: 2 });
-    expect((stats.series as unknown[]).length).toBe(24);
+    const series = stats.series as { bucket: number; income_atomic: number; calls: number }[];
+    expect(series.length).toBe(24);
+    // the hourly points must add up to the totals, not just exist
+    expect(series.reduce((t, p) => t + p.income_atomic, 0)).toBe(40_000);
+    expect(series.reduce((t, p) => t + p.calls, 0)).toBe(2);
+    expect(series.every((p) => Number.isInteger(p.bucket) && p.bucket % 3_600_000 === 0)).toBe(true);
 
     const feed = await (await api(`/api/feed?since=${now - 600}`)).json<{ calls: { id: string; tx_url: string | null }[] }>();
     expect(feed.calls.map((c) => c.id)).toEqual(["c3", "c2"]);
