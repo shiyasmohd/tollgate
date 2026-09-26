@@ -33,10 +33,10 @@
     // Payee of GET /demo/rogue; empty uses a known OFAC-listed address.
     "DEMO_ROGUE_PAY_TO": "",
     // ENSv2 endpoint names on Sepolia, filled from scripts/ens-setup.ts; empty turns them off.
-    "ENS_PARENT": "",
-    "ENS_REGISTRY": "",
-    "ENS_RESOLVER": "",
-    "SEPOLIA_RPC_URL": ""
+    "ENS_PARENT": "tollgate-x402.eth",
+    "ENS_REGISTRY": "0x2B14f40BD3f55564D9FA86e51EcB4aaf5B725703",
+    "ENS_RESOLVER": "0x454a0c32D81463E52D79d0703f7EfcB60ed6Ba73",
+    "SEPOLIA_RPC_URL": "",
   }
   // Secrets (wrangler secret put / .dev.vars): MASTER_KEY (base64, 32 bytes), SESSION_SECRET,
   // INTERCEPTA_API_KEY (free at https://intercepta.io/ethglobal)
