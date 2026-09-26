@@ -94,6 +94,8 @@ bun run migrate:remote
 bun run deploy
 ```
 
+Set `DASHBOARD_URL` in `worker/wrangler.jsonc` to the dashboard's origin so that browsers opening a paid URL are redirected to its `/pay/:id` page; left empty, they get a plain 402 page with the price.
+
 Then point `GATEWAY_URL` (MCP) and the seller CLI at the `*.workers.dev` URL. Rotating `MASTER_KEY` makes stored seller keys unreadable.
 
 ## Seller API

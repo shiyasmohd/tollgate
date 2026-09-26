@@ -7,6 +7,7 @@ interface __BaseEnv_Env {
 	NETWORK: "eip155:84532";
 	FACILITATOR_URL: "https://x402.org/facilitator";
 	UPSTREAM_TIMEOUT_MS: "30000";
+	DASHBOARD_URL: string;
 	MASTER_KEY: string;
 	SESSION_SECRET: string;
 }
@@ -21,7 +22,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "NETWORK" | "FACILITATOR_URL" | "UPSTREAM_TIMEOUT_MS" | "MASTER_KEY" | "SESSION_SECRET">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "NETWORK" | "FACILITATOR_URL" | "UPSTREAM_TIMEOUT_MS" | "DASHBOARD_URL" | "MASTER_KEY" | "SESSION_SECRET">> {}
 }
 
 // Begin runtime types

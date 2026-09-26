@@ -21,7 +21,10 @@
   "vars": {
     "NETWORK": "eip155:84532",
     "FACILITATOR_URL": "https://x402.org/facilitator",
-    "UPSTREAM_TIMEOUT_MS": "30000"
+    "UPSTREAM_TIMEOUT_MS": "30000",
+    // Seller dashboard origin, e.g. https://tollgate.example.com. When set, browsers
+    // that open a paid URL are sent to its /pay/:id page; empty shows a plain 402 page.
+    "DASHBOARD_URL": ""
   }
   // Secrets (wrangler secret put / .dev.vars): MASTER_KEY (base64, 32 bytes), SESSION_SECRET
 }

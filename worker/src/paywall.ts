@@ -8,7 +8,7 @@
 
 import type { MiddlewareHandler } from "hono";
 import { paymentMiddleware } from "@x402/hono";
-import { HTTPFacilitatorClient, x402ResourceServer, type HTTPRequestContext } from "@x402/core/server";
+import { HTTPFacilitatorClient, x402ResourceServer, type HTTPRequestContext, type PaywallProvider } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { getAddress } from "viem";
 import { atomicToUsd, type EndpointRow } from "./db";
@@ -25,6 +25,38 @@ function endpointFor(ctx: HTTPRequestContext): EndpointRow {
   const row = id ? routeEndpoints.get(id) : undefined;
   if (!row) throw new Error(`endpoint ${id} was not loaded before the paywall`);
   return row;
+}
+
+const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+
+/**
+ * What a browser sees when it opens a paid URL. With DASHBOARD_URL set it is sent
+ * to the dashboard's pay page (wallet connect, pay, response); without it, a plain
+ * page with the price. Programmatic clients never get this: x402 only serves HTML
+ * to requests that accept text/html from a Mozilla user agent.
+ */
+function paywallPage(env: Env): PaywallProvider {
+  return {
+    generateHtml(paymentRequired) {
+      const resource = new URL(paymentRequired.resource?.url ?? "/", "https://gateway.invalid");
+      const id = resource.pathname.split("/")[2] ?? "";
+      const quote = paymentRequired.accepts[0];
+      const price = quote ? `$${atomicToUsd(Number(quote.amount))} USDC` : "a USDC payment";
+      const dashboard = env.DASHBOARD_URL?.replace(/\/$/, "");
+      const payUrl = dashboard && id ? `${dashboard}/pay/${encodeURIComponent(id)}${resource.search}` : null;
+      const head = payUrl ? `<meta http-equiv="refresh" content="0;url=${escapeHtml(payUrl)}">` : "";
+      const body = payUrl
+        ? `<p>Taking you to the payment page…</p><p><a href="${escapeHtml(payUrl)}">Continue</a></p>`
+        : `<p>This API costs ${escapeHtml(price)} per request, paid on Base Sepolia with the x402 protocol.</p>
+           <p>Call it from an x402 client, or from Claude with the Tollgate MCP server. The payment requirements are in the <code>PAYMENT-REQUIRED</code> response header.</p>`;
+      return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${head}
+<title>Payment required · Tollgate</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f5f7;color:#0e1116;font:15px/1.55 system-ui,sans-serif}
+main{max-width:440px;margin:16px;padding:28px;background:#fff;border:1px solid #e3e5e9;border-radius:20px}h1{margin:0 0 8px;font-size:20px}
+p{margin:8px 0;color:#4a5160}a{color:#4d7c0f;font-weight:600}code{font-size:13px}</style></head>
+<body><main><h1>Payment required</h1>${body}</main></body></html>`;
+    },
+  };
 }
 
 function build(env: Env): MiddlewareHandler {
@@ -54,6 +86,8 @@ function build(env: Env): MiddlewareHandler {
       },
     },
     server,
+    undefined,
+    paywallPage(env),
   );
 }
 
