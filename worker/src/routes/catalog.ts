@@ -37,6 +37,8 @@ catalog.get("/", async (c) => {
       pay_to: r.owner,
       // Resolves on Sepolia ENSv2 to pay_to (Base Sepolia coin type); agents check the quote against it.
       ens_name: r.ens_name,
+      // The seller's own name (hashir.tollgate.eth) when they claimed one.
+      seller_ens_name: r.seller_ens_name,
       pay_to_risk: risk.get(r.owner) ?? null,
     })),
   });

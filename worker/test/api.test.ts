@@ -159,6 +159,32 @@ describe("endpoints", () => {
   });
 });
 
+describe("ENS names", () => {
+  it("reports the seller with no name, and refuses claims while ENS is off", async () => {
+    const { account, api } = await login();
+    const me = await (await api("/api/me")).json<{ address: string; name: unknown; ens: unknown }>();
+    expect(me).toEqual({ address: account.address.toLowerCase(), name: null, ens: null });
+    const claim = await api("/api/me/name", { method: "POST", body: JSON.stringify({ handle: "hashir" }) });
+    expect(claim.status).toBe(503);
+    expect((await api("/api/me/name/check?handle=hashir")).status).toBe(503);
+  });
+
+  it("validates and keeps an endpoint's ENS label", async () => {
+    const { api } = await login();
+    const bad = await api("/api/endpoints", { method: "POST", body: JSON.stringify({ ...echoEndpoint, ens_label: "Bad--Label" }) });
+    expect(bad.status).toBe(400);
+    expect((await bad.json<{ issues: { path: string }[] }>()).issues.map((i) => i.path)).toContain("ens_label");
+
+    const id = await createActive(api, { ens_label: "ElevenLabs" });
+    const read = async () => (await (await api(`/api/endpoints/${id}`)).json<{ endpoint: { ens_label: string | null } }>()).endpoint.ens_label;
+    expect(await read()).toBe("elevenlabs");
+    await api(`/api/endpoints/${id}`, { method: "PATCH", body: JSON.stringify({ price_usd: "0.03" }) });
+    expect(await read()).toBe("elevenlabs");
+    await api(`/api/endpoints/${id}`, { method: "PATCH", body: JSON.stringify({ ens_label: null }) });
+    expect(await read()).toBeNull();
+  });
+});
+
 describe("paid route", () => {
   it("quotes the seller's price and payout address, and lists it in the catalog", async () => {
     const { account, api } = await login();

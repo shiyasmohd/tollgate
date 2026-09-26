@@ -1,17 +1,29 @@
 // ENSv2 names for paid endpoints, on Sepolia. Each endpoint that activates gets
-// <label>.<ENS_PARENT> (e.g. weather.tollgate.eth) in the gateway's own subname
-// registry. The seller owns the name; the gateway's Permissioned Resolver holds
-// its records: the seller's payout address (mainnet and Base Sepolia coin types)
-// and the paid URL, price and network as text. Agents resolve the name and
-// refuse a 402 quote whose payTo differs from it.
+// a name owned by the seller; the gateway's Permissioned Resolver holds its
+// records: the seller's payout address (mainnet and Base Sepolia coin types) and
+// the paid URL, price and network as text. Agents resolve the name and refuse a
+// 402 quote whose payTo differs from it.
+//
+// Sellers can claim a handle: <handle>.<ENS_PARENT> (hashir.tollgate.eth), backed
+// by a UserRegistry of their own. Their endpoints are then named inside it
+// (elevenlabs.hashir.tollgate.eth). Without a handle an endpoint is named
+// <label>.<ENS_PARENT> in the gateway's registry.
+//
+//   <ENS_PARENT>                    gateway UserRegistry (ENS_REGISTRY)
+//   ├── weather.<ENS_PARENT>        endpoint of a seller without a handle
+//   └── hashir.<ENS_PARENT>         seller name → subregistry: the seller's UserRegistry
+//       └── elevenlabs.hashir.…     endpoint name, registered in the seller's registry
 //
 // One-time setup (parent name, registry, resolver): scripts/ens-setup.ts.
 
-import { bytesToHex, createPublicClient, createWalletClient, encodeFunctionData, getAddress, http, labelhash, parseAbi, type Hex } from "viem";
+import {
+  bytesToHex, createPublicClient, createWalletClient, encodeAbiParameters, encodeFunctionData, getAddress, http, keccak256, labelhash,
+  namehash, parseAbi, stringToHex, type Hex,
+} from "viem";
 import { nonceManager, privateKeyToAccount } from "viem/accounts";
 import { sepolia } from "viem/chains";
 import { normalize, packetToBytes, toCoinType } from "viem/ens";
-import { atomicToUsd, updateEndpoint, type EndpointRow } from "./db";
+import { atomicToUsd, getSeller, updateEndpoint, type EndpointRow } from "./db";
 
 /** ENSv2 beta on Sepolia: https://docs.ens.domains/learn/deployments#sepolia-ensv2-beta */
 export const ENS_V2 = {
@@ -50,8 +62,47 @@ export const resolverAbi = parseAbi([
   "function multicall(bytes[] calls) returns (bytes[])",
 ]);
 
+const factoryAbi = parseAbi([
+  "function deployProxy(address implementation, uint256 salt, bytes data) returns (address)",
+]);
+
 const BASE_SEPOLIA_COIN_TYPE = toCoinType(84532);
 const ONE_YEAR = 365 * 24 * 60 * 60;
+const ZERO = "0x0000000000000000000000000000000000000000";
+const expiry = () => BigInt(Math.floor(Date.now() / 1000) + ONE_YEAR);
+
+// ---- labels -----------------------------------------------------------------
+
+/** A single DNS-style label: 3–32 of a-z, 0-9 and inner hyphens, no "--". */
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])$/;
+
+const RESERVED = new Set([
+  "admin", "agent", "agents", "api", "app", "catalog", "dashboard", "demo", "docs", "ens", "eth", "gateway", "help", "mail",
+  "null", "pay", "root", "status", "support", "system", "test", "tollgate", "undefined", "www", "x402",
+]);
+
+export type LabelCheck = { ok: true; label: string } | { ok: false; error: string };
+
+/** Validates a handle or endpoint label a seller typed. */
+export function checkLabel(raw: string, what = "handle"): LabelCheck {
+  const label = raw.trim().toLowerCase();
+  if (label.length < 3 || label.length > 32) return { ok: false, error: `${what} must be 3 to 32 characters` };
+  if (!LABEL.test(label) || label.includes("--")) {
+    return { ok: false, error: `${what} can use a-z, 0-9 and single hyphens, and can't start or end with a hyphen` };
+  }
+  if (RESERVED.has(label)) return { ok: false, error: `${what} "${label}" is reserved` };
+  return { ok: true, label };
+}
+
+/** Whether a label is free in a registry. A registry that isn't deployed yet counts as empty. */
+async function labelFree(reader: ReturnType<typeof clients>["reader"], registry: Hex, label: string): Promise<boolean> {
+  try {
+    const state = await reader.readContract({ address: registry, abi: userRegistryAbi, functionName: "getState", args: [BigInt(labelhash(label))] });
+    return state.status === 0;
+  } catch {
+    return true;
+  }
+}
 
 /** DNS wire format, which ENSv2 resolver setters take instead of a namehash. */
 export const dnsEncode = (name: string): Hex => bytesToHex(packetToBytes(name));
@@ -70,7 +121,7 @@ function clients(env: Env) {
 }
 
 /** The endpoint's name as a label: "Weather API" → "weather-api". */
-function slug(name: string): string {
+export function slug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
 }
 
@@ -98,22 +149,34 @@ function recordCalls(name: string, ep: EndpointRow, paidUrl: string, network: st
  */
 export async function assignEnsName(env: Env, ep: EndpointRow, origin: string): Promise<string> {
   const { reader, wallet } = clients(env);
-  const registry = env.ENS_REGISTRY as Hex;
 
-  // The endpoint's name, or name + id suffix when another endpoint has it.
-  let label = normalize(slug(ep.name) || ep.id.slice(3, 11));
-  const state = await reader.readContract({ address: registry, abi: userRegistryAbi, functionName: "getState", args: [BigInt(labelhash(label))] });
-  if (state.status !== 0) label = normalize(`${label}-${ep.id.slice(3, 9)}`);
-  const name = `${label}.${env.ENS_PARENT}`;
+  // Inside the seller's own registry when they have a handle, else the gateway's.
+  // A seller registry that was only just deployed may not be mined yet: fall back.
+  const seller = await getSeller(env.DB, ep.owner);
+  const places: { registry: Hex; parent: string }[] = [{ registry: env.ENS_REGISTRY as Hex, parent: env.ENS_PARENT }];
+  if (seller?.status === "registered" && seller.registry) places.unshift({ registry: seller.registry as Hex, parent: seller.ens_name });
 
-  const { request } = await reader.simulateContract({
-    account: wallet.account,
-    address: registry,
-    abi: userRegistryAbi,
-    functionName: "register",
-    args: [label, getAddress(ep.owner), "0x0000000000000000000000000000000000000000", env.ENS_RESOLVER as Hex, SELLER_ROLES, BigInt(Math.floor(Date.now() / 1000) + ONE_YEAR)],
-  });
-  await wallet.writeContract(request);
+  let name = "";
+  for (const [i, place] of places.entries()) {
+    // The label the seller picked, else the endpoint's name; + id suffix when taken.
+    let label = normalize(ep.ens_label || slug(ep.name) || ep.id.slice(3, 11));
+    if (!(await labelFree(reader, place.registry, label))) label = normalize(`${label.slice(0, 25)}-${ep.id.slice(3, 9)}`);
+    try {
+      const { request } = await reader.simulateContract({
+        account: wallet.account,
+        address: place.registry,
+        abi: userRegistryAbi,
+        functionName: "register",
+        args: [label, getAddress(ep.owner), ZERO, env.ENS_RESOLVER as Hex, SELLER_ROLES, expiry()],
+      });
+      await wallet.writeContract(request);
+      name = `${label}.${place.parent}`;
+      break;
+    } catch (e) {
+      if (i === places.length - 1) throw e;
+      console.warn(`ENS: can't name ${ep.id} under ${place.parent} yet, using ${env.ENS_PARENT}`, e);
+    }
+  }
   await wallet.writeContract({
     address: env.ENS_RESOLVER as Hex,
     abi: resolverAbi,
@@ -133,4 +196,73 @@ export async function updateEnsPrice(env: Env, name: string, priceAtomic: number
     functionName: "setText",
     args: [dnsEncode(name), "x402.price", atomicToUsd(priceAtomic)],
   });
+}
+
+// ---- seller names -----------------------------------------------------------
+
+/** Whether <handle>.<ENS_PARENT> is still free on-chain (it shares the registry with flat endpoint names). */
+export async function handleAvailable(env: Env, handle: string): Promise<boolean> {
+  const { reader } = clients(env);
+  return labelFree(reader, env.ENS_REGISTRY as Hex, handle);
+}
+
+/**
+ * Names a seller: deploys a UserRegistry for them (the gateway and the seller
+ * both get every role), registers <handle>.<ENS_PARENT> in the gateway's
+ * registry with that as its subregistry, writes the seller's payout address as
+ * its records and points the new registry at its parent.
+ *
+ * Every transaction is sent back to back without waiting to be mined: the
+ * registry's address comes from simulating its deployment, and the one call to
+ * the not-yet-deployed registry (setParent) carries an explicit gas limit. The
+ * wallet's nonce order makes the deployment land first.
+ */
+export async function claimSellerName(env: Env, seller: string, handle: string): Promise<{ name: string; registry: Hex }> {
+  const { reader, wallet } = clients(env);
+  const owner = getAddress(seller);
+  const name = `${handle}.${env.ENS_PARENT}`;
+
+  // Salted with the time, so a retry after a failed attempt never collides with it.
+  const salt = BigInt(
+    keccak256(encodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }, { type: "uint256" }], [keccak256(stringToHex("SellerRegistry")), namehash(name), BigInt(Date.now())])),
+  );
+  const grants = [
+    { account: wallet.account.address, roleBitmap: ALL_ROLES },
+    { account: owner, roleBitmap: ALL_ROLES },
+  ];
+  const deploy = await reader.simulateContract({
+    account: wallet.account,
+    address: ENS_V2.verifiableFactory,
+    abi: factoryAbi,
+    functionName: "deployProxy",
+    args: [ENS_V2.userRegistryImpl, salt, encodeFunctionData({ abi: userRegistryAbi, functionName: "initialize", args: [grants] })],
+  });
+  const registry = deploy.result;
+
+  // Simulate the name registration before sending anything, so a taken handle fails cleanly.
+  const register = await reader.simulateContract({
+    account: wallet.account,
+    address: env.ENS_REGISTRY as Hex,
+    abi: userRegistryAbi,
+    functionName: "register",
+    args: [handle, owner, registry, env.ENS_RESOLVER as Hex, SELLER_ROLES, expiry()],
+  });
+
+  await wallet.writeContract(deploy.request);
+  await wallet.writeContract(register.request);
+  const dns = dnsEncode(name);
+  await wallet.writeContract({
+    address: env.ENS_RESOLVER as Hex,
+    abi: resolverAbi,
+    functionName: "multicall",
+    args: [[
+      encodeFunctionData({ abi: resolverAbi, functionName: "setAddress", args: [dns, 60n, owner] }),
+      encodeFunctionData({ abi: resolverAbi, functionName: "setAddress", args: [dns, BASE_SEPOLIA_COIN_TYPE, owner] }),
+      encodeFunctionData({ abi: resolverAbi, functionName: "setText", args: [dns, "description", `Seller on ${env.ENS_PARENT}`] }),
+      encodeFunctionData({ abi: resolverAbi, functionName: "setText", args: [dns, "x402.network", env.NETWORK] }),
+    ]],
+  });
+  // Can't be estimated before the registry exists, hence the fixed gas.
+  await wallet.writeContract({ address: registry, abi: userRegistryAbi, functionName: "setParent", args: [env.ENS_REGISTRY as Hex, handle], gas: 250_000n });
+  return { name, registry };
 }

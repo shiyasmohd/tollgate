@@ -70,4 +70,3 @@ stats.get("/feed", async (c) => {
   });
 });
 
-stats.get("/me", (c) => c.json({ address: c.var.seller }));

@@ -8,7 +8,7 @@ import {
   getEndpointWithTotals, getOwnedEndpoint, insertEndpoint, listEndpoints, newId, toSellerEndpoint, updateEndpoint,
   type EndpointRow, type EndpointWithTotals,
 } from "../db";
-import { assignEnsName, ensEnabled, updateEnsPrice } from "../ens";
+import { assignEnsName, checkLabel, ensEnabled, updateEnsPrice } from "../ens";
 import { callUpstream, prepareBody } from "../proxy";
 import type { AppEnv } from "../types";
 import { checkUpstreamUrl } from "../url-guard";
@@ -29,6 +29,17 @@ const JsonText = z
   .union([z.string(), z.record(z.string(), z.unknown()), z.array(z.unknown())])
   .transform((v) => (typeof v === "string" ? v : JSON.stringify(v)))
   .pipe(z.string().max(65_536));
+
+// Label for the endpoint's ENS name ("elevenlabs"); used the first time it activates.
+const EnsLabel = z
+  .string()
+  .nullish()
+  .superRefine((v, ctx) => {
+    const r = v ? checkLabel(v, "ens_label") : null;
+    if (r && !r.ok) ctx.addIssue({ code: "custom", message: r.error });
+  })
+  // undefined stays undefined, so a PATCH without it keeps the stored label
+  .transform((v) => (v === undefined ? undefined : v ? v.trim().toLowerCase() : null));
 
 const Auth = z.discriminatedUnion("type", [
   z.object({ type: z.literal("none") }),
@@ -54,6 +65,7 @@ const fields = {
   body_overrides: z.record(z.string(), z.unknown()).nullish(),
   max_body_bytes: z.number().int().min(0).max(1_048_576),
   screen_payers: z.boolean(),
+  ens_label: EnsLabel,
 };
 
 const EndpointInput = z.object({
@@ -124,6 +136,7 @@ endpoints.post("/", async (c) => {
     max_body_bytes: input.max_body_bytes,
     screen_payers: input.screen_payers ? 1 : 0,
     ens_name: null,
+    ens_label: input.ens_label ?? null,
     status: "pending",
     created_at: now,
     updated_at: now,
@@ -147,6 +160,8 @@ endpoints.patch("/:id", async (c) => {
     price_atomic: input.price_usd,
     max_body_bytes: input.max_body_bytes,
     screen_payers: input.screen_payers === undefined ? undefined : input.screen_payers ? 1 : 0,
+    // only matters until the endpoint has been named
+    ens_label: input.ens_label,
   };
   if (input.url !== undefined) {
     const url = checkUpstreamUrl(input.url, new URL(c.req.url).host);
