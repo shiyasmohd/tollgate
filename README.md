@@ -121,6 +121,31 @@ The key stays in the gateway (`INTERCEPTA_API_KEY` secret); the MCP server and t
 - The signature scanner's `messageType` enum lists only permit types; explicit support for EIP-3009 `TransferWithAuthorization` (what x402 signs) would make it a natural fit.
 - An x402-specific endpoint (screen a whole `PAYMENT-REQUIRED` quote in one call) would replace three calls.
 
+## ENS names (ENSv2, Sepolia)
+
+Every endpoint gets an [ENSv2](https://docs.ens.domains/ensv2/overview/) name when it first activates, e.g. `weather.tollgate-x402.eth`:
+
+- The gateway runs its own subname registry for the parent name. It registers the endpoint's label there, with the **seller as owner**. The seller holds the name's roles to change its resolver or registry and to transfer it.
+- The gateway's Permissioned Resolver holds the records:
+  - `addr` for mainnet and Base Sepolia (coin type `toCoinType(84532)`) is the seller's payout address.
+  - Text records: `url` (the paid URL), `description`, `x402.endpoint`, `x402.price` (kept in sync on price changes) and `x402.network`.
+- **Seller names.** A seller can claim a handle, `hashir.tollgate-x402.eth`. The gateway deploys a UserRegistry for that seller (the seller and the gateway both get every role), registers the handle in its own registry with that as the subregistry, sets the seller's payout address on it and links the new registry to its parent. After that, the seller's endpoints are named inside their registry: `elevenlabs.hashir.tollgate-x402.eth`. Sellers without a handle keep flat names.
+  - `GET /api/me` returns `{ address, name, ens }`: `name` is the seller's `{ handle, ens_name, registry, status }` or null, and `ens` is `{ parent }` or null when ENS is off.
+  - `GET /api/me/name/check?handle=hashir` returns `{ handle, name, available, reason? }`.
+  - `POST /api/me/name { "handle": "hashir" }` claims it. It returns 201 `{ name }`, 409 `handle_taken` / `already_named` / `in_progress`, 400 for a bad handle (3–32 of a-z, 0-9, inner hyphens; some words are reserved), 502 `ens_failed` or 503 `ens_disabled`.
+  - Endpoints take an optional `ens_label` (e.g. `"elevenlabs"`), used the first time the endpoint activates. Without one, the label comes from the endpoint name. A taken label gets `-<6 chars of the id>`.
+- `/catalog` lists `ens_name` and `seller_ens_name`. In the MCP, `paid_fetch` accepts it in place of the endpoint id. Before paying, it resolves the name on Sepolia and refuses when the name's address differs from the catalog's `pay_to`. It then requires the 402 quote's `payTo` to match the ENS record.
+
+Setup (once): the key needs a little Sepolia ETH. The registration fee is paid in MockUSDC, which the script mints.
+
+```bash
+ENS_PRIVATE_KEY=0x... ENS_LABEL=tollgate-x402 bun scripts/ens-setup.ts   # deploys registry + resolver, registers the .eth name
+# put the printed ENS_PARENT / ENS_REGISTRY / ENS_RESOLVER into worker/wrangler.jsonc, then:
+cd worker && bunx wrangler secret put ENS_PRIVATE_KEY && bun run migrate:remote && bun run deploy
+```
+
+With those unset, names are off. Name transactions are sent in the background, so a name resolves a block or two after activation.
+
 ## Deploy
 
 ```bash

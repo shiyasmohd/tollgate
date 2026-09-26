@@ -5,3 +5,6 @@ SESSION_SECRET=
 # Intercepta (Web3 Antivirus) API key for payment screening: https://intercepta.io/ethglobal
 # Empty turns screening off.
 INTERCEPTA_API_KEY=
+# Sepolia key that owns the ENS parent name and pays gas for endpoint names (scripts/ens-setup.ts).
+# Empty turns ENS names off.
+ENS_PRIVATE_KEY=

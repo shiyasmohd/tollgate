@@ -8,7 +8,8 @@ import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from "@x402/
 import { registerExactEvmScheme } from "@x402/evm/exact/client";
 import { wrapFetchWithPayment } from "@x402/fetch";
 import { createPublicClient, erc20Abi, formatUnits, http, type LocalAccount } from "viem";
-import { baseSepolia } from "viem/chains";
+import { baseSepolia, sepolia } from "viem/chains";
+import { normalize, toCoinType } from "viem/ens";
 import { z } from "zod";
 
 const NETWORK = "eip155:84532";
@@ -35,6 +36,8 @@ export interface ServerConfig {
   /** How the budget window reads to Claude, e.g. "session" or "24h". */
   budgetWindow: string;
   ledger: SpendLedger;
+  /** Sepolia RPC for ENS lookups (endpoint names live on ENSv2 there). */
+  sepoliaRpcUrl?: string;
   /** Keeps a binary response (audio, images, PDFs…) and returns where to get it: a URL or a file path. */
   storeFile: (bytes: Uint8Array, mimeType: string, extension: string) => Promise<string>;
 }
@@ -69,6 +72,14 @@ interface CatalogEntry {
   accepts_body: boolean;
   pay_to: string;
   pay_to_risk?: { verdict: string; summary: string } | null;
+  ens_name?: string | null;
+}
+
+/** Who a payment must go to and how much at most, and where that came from. */
+interface Expected {
+  payTo: string;
+  amount: bigint;
+  source: string;
 }
 
 /** The gateway's POST /screen answer (Intercepta, via the gateway, which holds the key). */
@@ -109,6 +120,17 @@ const text = (t: string, isError = false) => ({ content: [{ type: "text" as cons
 
 export function createServer(cfg: ServerConfig): McpServer {
   const chain = createPublicClient({ chain: baseSepolia, transport: http() });
+  const ens = createPublicClient({ chain: sepolia, transport: http(cfg.sepoliaRpcUrl ?? "https://ethereum-sepolia-rpc.publicnode.com") });
+
+  /** The Base Sepolia payout address an ENS name resolves to, or null if it doesn't (yet). */
+  async function ensPayTo(name: string): Promise<string | null> {
+    try {
+      const addr = await ens.getEnsAddress({ name: normalize(name), coinType: toCoinType(baseSepolia.id) });
+      return addr?.toLowerCase() ?? null;
+    } catch {
+      return null;
+    }
+  }
 
   async function catalog(): Promise<CatalogEntry[]> {
     const res = await cfg.fetch(`${cfg.gatewayUrl}/catalog`);
@@ -143,7 +165,7 @@ export function createServer(cfg: ServerConfig): McpServer {
   // the wallet is about to sign.
   function payingFetch(
     account: PayingAccount,
-    expected: { payTo: string; amount: bigint } | null,
+    expected: Expected | null,
     spent: bigint,
     screenings: Screening[],
     doFetch: typeof fetch,
@@ -163,7 +185,7 @@ export function createServer(cfg: ServerConfig): McpServer {
     client.setSpendControls({ maxAmountPerPayment: `$${atomicToUsd(cfg.maxPerCall)}` });
     client.onBeforePaymentCreation(async ({ selectedRequirements: req }) => {
       const amount = BigInt(req.amount);
-      if (expected && req.payTo.toLowerCase() !== expected.payTo) return { abort: true, reason: "payTo differs from the catalog" };
+      if (expected && req.payTo.toLowerCase() !== expected.payTo) return { abort: true, reason: `payTo differs from the ${expected.source}` };
       if (expected && amount > expected.amount) return { abort: true, reason: `quoted $${atomicToUsd(amount)}, catalog says $${atomicToUsd(expected.amount)}` };
       if (amount > cfg.maxPerCall) return { abort: true, reason: `price exceeds the per-call limit ($${atomicToUsd(cfg.maxPerCall)})` };
       if (spent + amount > cfg.budget)
@@ -199,8 +221,10 @@ export function createServer(cfg: ServerConfig): McpServer {
     account: PayingAccount;
     url: URL;
     init: RequestInit;
-    expected: { payTo: string; amount: bigint } | null;
+    expected: Expected | null;
     doFetch: typeof fetch;
+    /** Extra lines for the result, e.g. the ENS check. */
+    notes?: string[];
   }) {
     const screenings: Screening[] = [];
     const paidFetch = payingFetch(opts.account, opts.expected, await cfg.ledger.spent(), screenings, opts.doFetch);
@@ -241,7 +265,7 @@ export function createServer(cfg: ServerConfig): McpServer {
         if (reason) receipt = `Not charged. Payment rejected: ${reason}. Check wallet_status for the USDC balance.`;
       } catch {}
     }
-    const head = [receipt, screeningReport(screenings)].filter(Boolean).join("\n");
+    const head = [receipt, ...(opts.notes ?? []), screeningReport(screenings)].filter(Boolean).join("\n");
 
     const bytes = new Uint8Array(await res.arrayBuffer());
     const mimeType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
@@ -283,6 +307,7 @@ export function createServer(cfg: ServerConfig): McpServer {
         example_query: e.example.query,
         example_body: e.example.body,
         seller_risk: e.pay_to_risk ?? undefined,
+        ens_name: e.ens_name ?? undefined,
       }));
       return text(JSON.stringify(menu, null, 2));
     },
@@ -292,17 +317,34 @@ export function createServer(cfg: ServerConfig): McpServer {
     "paid_fetch",
     {
       description:
-        "Call a paid API from list_paid_apis, paying its per-call price in USDC on Base Sepolia. Returns the API's response and the payment transaction. Non-text responses (audio, images, PDFs) are saved and returned as a link (valid 24h) or file path to pass on to the user. You are only charged if the API succeeds.",
+        "Call a paid API from list_paid_apis (by endpoint_id or its ENS name), paying its per-call price in USDC on Base Sepolia. Returns the API's response and the payment transaction. Non-text responses (audio, images, PDFs) are saved and returned as a link (valid 24h) or file path to pass on to the user. You are only charged if the API succeeds.",
       inputSchema: z.object({
-        endpoint_id: z.string().describe("endpoint_id from list_paid_apis"),
+        endpoint_id: z.string().describe("endpoint_id or ens_name from list_paid_apis, e.g. weather.tollgate.eth"),
         query: z.string().optional().describe("Query string without '?', e.g. 'q=lisbon&limit=3'"),
         body: z.string().optional().describe("Request body for POST/PUT/PATCH endpoints, usually JSON"),
       }),
     },
     async ({ endpoint_id, query, body }) => {
       if (!cfg.account) return text("Cannot pay: no buyer wallet is configured for this MCP server.", true);
-      const entry = (await catalog()).find((e) => e.id === endpoint_id);
+      const entry = (await catalog()).find((e) => e.id === endpoint_id || e.ens_name === endpoint_id);
       if (!entry) return text(`Unknown endpoint_id "${endpoint_id}". Call list_paid_apis first.`, true);
+
+      // The seller's payout address comes from ENS when the endpoint has a name:
+      // a gateway that changed pay_to can't make the quote match the ENS record.
+      let expected: Expected = { payTo: entry.pay_to.toLowerCase(), amount: BigInt(entry.price_atomic), source: "catalog" };
+      const notes: string[] = [];
+      if (entry.ens_name) {
+        const onchain = await ensPayTo(entry.ens_name);
+        if (onchain && onchain !== expected.payTo) {
+          return text(`Refused: ${entry.ens_name} resolves to ${onchain}, but the catalog says pay ${expected.payTo}. Nothing was paid.`, true);
+        }
+        if (onchain) expected = { ...expected, source: `ENS record of ${entry.ens_name}` };
+        notes.push(
+          onchain
+            ? `ENS: ${entry.ens_name} → ${onchain} (Base Sepolia), matches the payee.`
+            : `ENS: ${entry.ens_name} doesn't resolve yet; checked against the catalog only.`,
+        );
+      }
 
       const url = new URL(entry.url);
       if (query) url.search = query.replace(/^\?/, "");
@@ -316,8 +358,9 @@ export function createServer(cfg: ServerConfig): McpServer {
         account: cfg.account,
         url,
         init,
-        expected: { payTo: entry.pay_to.toLowerCase(), amount: BigInt(entry.price_atomic) },
+        expected,
         doFetch: cfg.fetch,
+        notes,
       });
     },
   );
