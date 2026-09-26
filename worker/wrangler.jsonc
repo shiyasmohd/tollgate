@@ -36,10 +36,10 @@
     // With the MULTIBAAS_API_KEY secret set, settled calls are verified against USDC
     // Transfers it indexes; MULTIBAAS_WEBHOOK_SECRET signs POST /hooks/multibaas.
     // Empty turns onchain verification off. scripts/multibaas-setup.ts configures it.
-    "MULTIBAAS_URL": "",
+    "MULTIBAAS_URL": "https://mk4en6fwefeghj6yesyz64dy5e.multibaas.com",
     // When MultiBaas started syncing USDC events (ISO date or ms). Calls before it
     // are shown as not tracked instead of unverified.
-    "MULTIBAAS_SYNC_FROM": "",
+    "MULTIBAAS_SYNC_FROM": "2026-09-26T20:38:10.825Z",
     // The token x402 settles in: USDC on Base Sepolia.
     "USDC_ADDRESS": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
   }

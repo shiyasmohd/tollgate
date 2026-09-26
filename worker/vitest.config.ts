@@ -16,6 +16,7 @@ export default defineConfig(async () => {
             MULTIBAAS_URL: "https://multibaas.test",
             MULTIBAAS_API_KEY: "test-mb-key",
             MULTIBAAS_WEBHOOK_SECRET: "test-webhook-secret",
+            MULTIBAAS_SYNC_FROM: "", // tests make calls minutes in the past; the deployed value would mark them untracked
           },
         },
       }),
