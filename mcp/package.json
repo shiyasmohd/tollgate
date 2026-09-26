@@ -1,0 +1,25 @@
+{
+  "name": "mcp",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "x402-gateway-mcp": "src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "smoke": "bun src/smoke.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "@x402/core": "2.27.0",
+    "@x402/evm": "2.27.0",
+    "@x402/fetch": "2.27.0",
+    "viem": "^2.56.9",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "5.9.3"
+  }
+}

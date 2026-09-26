@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "x402-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  // @x402/hono uses Buffer.
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "x402-gateway",
+      "database_id": "94e796b3-c73b-438d-a4c2-c9bb96910ad1",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Per-caller limit on paid routes, keyed by endpoint + client IP.
+  "ratelimits": [
+    { "name": "RL", "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } }
+  ],
+  "vars": {
+    "NETWORK": "eip155:84532",
+    "FACILITATOR_URL": "https://x402.org/facilitator",
+    "UPSTREAM_TIMEOUT_MS": "30000"
+  }
+  // Secrets (wrangler secret put / .dev.vars): MASTER_KEY (base64, 32 bytes), SESSION_SECRET
+}

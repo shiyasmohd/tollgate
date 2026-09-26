@@ -1,0 +1,11 @@
+{
+  "name": "Echo (httpbin)",
+  "description": "Echoes the request back as JSON. Free upstream, useful for testing payments end to end.",
+  "method": "POST",
+  "url": "https://httpbin.org/anything",
+  "auth": { "type": "header", "name": "Authorization", "value": "Bearer sk-test-not-a-real-key-123" },
+  "static_headers": { "x-demo": "1" },
+  "price_usd": "0.001",
+  "example_body": { "prompt": "hello" },
+  "body_overrides": { "max_tokens": 100 }
+}

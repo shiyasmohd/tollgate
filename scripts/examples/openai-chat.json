@@ -1,0 +1,11 @@
+{
+  "name": "OpenAI chat completions (gpt-4o-mini)",
+  "description": "OpenAI Chat Completions. POST a JSON body like {\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"...\"}]}. Responses are capped at 500 tokens and streaming is disabled.",
+  "method": "POST",
+  "url": "https://api.openai.com/v1/chat/completions",
+  "auth": { "type": "header", "name": "Authorization", "value": "Bearer REPLACE_WITH_OPENAI_KEY" },
+  "price_usd": "0.01",
+  "example_body": { "model": "gpt-4o-mini", "messages": [{ "role": "user", "content": "Say hi in five words." }] },
+  "body_overrides": { "model": "gpt-4o-mini", "max_tokens": 500, "stream": false, "n": 1 },
+  "max_body_bytes": 32768
+}

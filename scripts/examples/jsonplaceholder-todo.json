@@ -1,0 +1,7 @@
+{
+  "name": "Todo #1 (JSONPlaceholder)",
+  "description": "Returns todo item #1 as JSON: { userId, id, title, completed }. GET, no parameters.",
+  "method": "GET",
+  "url": "https://jsonplaceholder.typicode.com/todos/1",
+  "price_usd": "0.001"
+}
