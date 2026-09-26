@@ -135,16 +135,43 @@ describe("event query", () => {
         rule: "and",
         children: [
           { fieldType: "contract_address_alias", operator: "equal", value: "usdc" },
-          { fieldType: "input", inputIndex: 1, operator: "equal", value: getAddress(seller) },
+          { fieldType: "input", inputIndex: 1, operator: "equal", value: seller.toLowerCase() },
         ],
       },
     });
   });
 
-  it("throws when MultiBaas is off or fails", async () => {
+  it("pages through results 50 at a time, stopping at the limit or the last page", async () => {
+    const env = { MULTIBAAS_URL: "https://mb.example", MULTIBAAS_API_KEY: "k" };
+    const row = (i: number) => ({ txhash: hash(i), sender: "0x1111111111111111111111111111111111111111", recipient: seller, amount: "1", block: i, timestamp: "2026-09-27T01:00:00Z" });
+    const pages = (total: number) => {
+      const urls: string[] = [];
+      const doFetch = (async (input: RequestInfo | URL) => {
+        const u = new URL(String(input));
+        urls.push(`${u.searchParams.get("offset")}/${u.searchParams.get("limit")}`);
+        const offset = Number(u.searchParams.get("offset"));
+        const n = Math.max(0, Math.min(Number(u.searchParams.get("limit")), total - offset));
+        return Response.json({ status: 200, message: "success", result: { rows: Array.from({ length: n }, (_, k) => row(offset + k + 1)) } });
+      }) as typeof fetch;
+      return { urls, doFetch };
+    };
+
+    const many = pages(1000);
+    expect(await queryTransfersTo(env, seller, 120, many.doFetch)).toHaveLength(120);
+    expect(many.urls).toEqual(["0/50", "50/50", "100/20"]);
+
+    const few = pages(60);
+    expect(await queryTransfersTo(env, seller, 500, few.doFetch)).toHaveLength(60);
+    expect(few.urls).toEqual(["0/50", "50/50"]);
+  });
+
+  it("throws when MultiBaas is off or fails, with its reason", async () => {
     await expect(queryTransfersTo({}, seller)).rejects.toThrow("not configured");
+    const env = { MULTIBAAS_URL: "https://mb.example", MULTIBAAS_API_KEY: "k" };
     const down = (async () => new Response("nope", { status: 502 })) as typeof fetch;
-    await expect(queryTransfersTo({ MULTIBAAS_URL: "https://mb.example", MULTIBAAS_API_KEY: "k" }, seller, 50, down)).rejects.toThrow("HTTP 502");
+    await expect(queryTransfersTo(env, seller, 50, down)).rejects.toThrow("HTTP 502");
+    const rejected = (async () => Response.json({ status: 400, message: "invalid request" }, { status: 400 })) as typeof fetch;
+    await expect(queryTransfersTo(env, seller, 50, rejected)).rejects.toThrow("MultiBaas event query failed: HTTP 400 (invalid request)");
   });
 });
 

@@ -13,7 +13,7 @@
 // Without MULTIBAAS_URL and MULTIBAAS_API_KEY nothing is verified and the
 // dashboard shows no onchain state; the gateway works exactly as before.
 
-import { getAddress, isAddress } from "viem";
+import { isAddress } from "viem";
 
 export interface MultiBaasEnv {
   MULTIBAAS_URL?: string;
@@ -27,6 +27,8 @@ export interface MultiBaasEnv {
 type Fetcher = typeof fetch;
 
 const TIMEOUT_MS = 5000;
+/** MultiBaas returns at most this many rows per query page; a larger limit is a 400 "invalid request". */
+const PAGE_SIZE = 50;
 const WEBHOOK_TOLERANCE_S = 5 * 60;
 const DEFAULT_USDC = "0x036cbd53842c5426634e7929541ec2318f3dcf7e";
 /** The address alias scripts/multibaas-setup.ts gives the USDC contract. */
@@ -141,12 +143,14 @@ export function transfersFromWebhook(body: unknown, usdc: string): Transfer[] {
 // ---- event queries -------------------------------------------------------------
 
 /**
- * A seller's most recent USDC receipts, newest first, from MultiBaas's index of
- * the USDC contract. Runs an ad hoc event query, so nothing has to be saved in
- * MultiBaas first. Throws when MultiBaas is off, unreachable or rejects the query.
+ * A seller's most recent USDC receipts (up to `limit`), newest first, from
+ * MultiBaas's index of the USDC contract. Runs an ad hoc event query, so nothing
+ * has to be saved in MultiBaas first, a page of PAGE_SIZE rows at a time.
+ * Throws when MultiBaas is off, unreachable or rejects the query.
  */
 export async function queryTransfersTo(env: MultiBaasEnv, owner: string, limit = 500, doFetch: Fetcher = fetch): Promise<Transfer[]> {
   if (!multibaasEnabled(env)) throw new Error("MultiBaas is not configured");
+  const recipient = owner.toLowerCase();
   const query = {
     events: [
       {
@@ -164,7 +168,8 @@ export async function queryTransfersTo(env: MultiBaasEnv, owner: string, limit =
           rule: "and",
           children: [
             { fieldType: "contract_address_alias", operator: "equal", value: USDC_ALIAS },
-            { fieldType: "input", inputIndex: 1, operator: "equal", value: getAddress(owner) },
+            // MultiBaas compares address inputs as stored, lowercase: a checksummed value matches nothing.
+            { fieldType: "input", inputIndex: 1, operator: "equal", value: recipient },
           ],
         },
       },
@@ -172,17 +177,31 @@ export async function queryTransfersTo(env: MultiBaasEnv, owner: string, limit =
     orderBy: "timestamp",
     order: "DESC",
   };
-  const url = `${env.MULTIBAAS_URL!.trim().replace(/\/+$/, "")}/api/v0/queries?offset=0&limit=${limit}`;
-  const res = await doFetch(url, {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.MULTIBAAS_API_KEY!.trim()}`, "content-type": "application/json" },
-    body: JSON.stringify(query),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
-  if (!res.ok) throw new Error(`MultiBaas event query failed: HTTP ${res.status}`);
-  const json = await res.json<{ result?: { rows?: Record<string, unknown>[] } }>();
-  const rows = json.result?.rows ?? [];
-  return rows
-    .map((r) => toTransfer({ tx: r.txhash, from: r.sender, to: r.recipient, value: r.amount, block: r.block, time: r.timestamp }))
-    .filter((t): t is Transfer => t !== null && t.owner === owner.toLowerCase());
+  const base = `${env.MULTIBAAS_URL!.trim().replace(/\/+$/, "")}/api/v0/queries`;
+  const out: Transfer[] = [];
+  for (let offset = 0; offset < limit; offset += PAGE_SIZE) {
+    const size = Math.min(PAGE_SIZE, limit - offset);
+    const res = await doFetch(`${base}?offset=${offset}&limit=${size}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.MULTIBAAS_API_KEY!.trim()}`, "content-type": "application/json" },
+      body: JSON.stringify(query),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      // MultiBaas explains itself in {status, message}; keep that in the error the dashboard shows.
+      const detail = await res
+        .json<{ message?: unknown }>()
+        .then((j) => (typeof j.message === "string" ? j.message : ""))
+        .catch(() => "");
+      throw new Error(`MultiBaas event query failed: HTTP ${res.status}${detail ? ` (${detail})` : ""}`);
+    }
+    const json = await res.json<{ result?: { rows?: Record<string, unknown>[] } }>();
+    const rows = json.result?.rows ?? [];
+    for (const r of rows) {
+      const t = toTransfer({ tx: r.txhash, from: r.sender, to: r.recipient, value: r.amount, block: r.block, time: r.timestamp });
+      if (t && t.owner === recipient) out.push(t);
+    }
+    if (rows.length < size) break;
+  }
+  return out;
 }
